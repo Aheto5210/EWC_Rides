@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>EWC Rides</title>
     <meta name="theme-color" content="#0b0b0c" />
-    <link rel="manifest" href="/manifest.webmanifest" />
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="manifest" href="/assets/manifest.webmanifest" />
+    <link rel="stylesheet" href="/assets/css/styles.css" />
   </head>
   <body>
     <main class="shell">
@@ -38,7 +38,7 @@
 
       <div id="homeView">
         <div class="hero">
-          <img class="hero__logo" src="/icon.svg" alt="EWC" />
+          <img class="hero__logo" src="/assets/icon.svg" alt="EWC" />
           <div class="hero__title">EWC Rides</div>
           <div class="hero__sub">Choose a driver. Send a pickup request. Go.</div>
         </div>
@@ -134,7 +134,10 @@
       </div>
 
       <footer class="footer">
-        <button id="btnReset" class="link" type="button">Reload</button>
+        <button id="btnReset" class="link" type="button">
+          <span class="link__label">Reload</span>
+          <span class="link__spinner" aria-hidden="true"></span>
+        </button>
       </footer>
     </main>
 
@@ -165,6 +168,6 @@
       </div>
     </div>
 
-    <script type="module" src="/app.js"></script>
+    <script type="module" src="/assets/js/main.js"></script>
   </body>
 </html>

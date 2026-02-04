@@ -10,7 +10,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = Number(process.env.PORT ?? 3000);
-const PUBLIC_DIR = path.join(__dirname, "public");
+const PUBLIC_DIR = path.join(__dirname, "..", "public");
 
 const ROOM_CODE = (process.env.ROOM_CODE ?? "").trim() || null;
 const MAX_PICKUP_MINUTES = clampNumber(
@@ -410,6 +410,7 @@ async function serveStatic(req, res) {
       ".json": "application/json; charset=utf-8",
       ".webmanifest": "application/manifest+json; charset=utf-8",
       ".svg": "image/svg+xml",
+      ".mp3": "audio/mpeg",
       ".png": "image/png",
       ".ico": "image/x-icon",
     }[ext];
@@ -764,9 +765,9 @@ const USE_HTTPS = ["1", "true", "yes"].includes(
 );
 const HTTPS_PORT = Number(process.env.HTTPS_PORT ?? 3443);
 const HTTPS_CERT_FILE =
-  (process.env.HTTPS_CERT_FILE ?? path.join(__dirname, ".cert", "cert.pem")).trim();
+  (process.env.HTTPS_CERT_FILE ?? path.join(__dirname, "..", ".cert", "cert.pem")).trim();
 const HTTPS_KEY_FILE =
-  (process.env.HTTPS_KEY_FILE ?? path.join(__dirname, ".cert", "key.pem")).trim();
+  (process.env.HTTPS_KEY_FILE ?? path.join(__dirname, "..", ".cert", "key.pem")).trim();
 
 const httpServer = http.createServer(requestHandler);
 httpServer.on("error", (err) => {

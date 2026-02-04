@@ -1,5 +1,26 @@
-const CACHE_NAME = "ewc-rides-v15";
-const ASSETS = ["/", "/index.html", "/styles.css", "/app.js", "/manifest.webmanifest", "/icon.svg"];
+const CACHE_NAME = "ewc-rides-v32";
+const ASSETS = [
+  "/",
+  "/index.html",
+  "/assets/css/styles.css",
+  "/assets/js/main.js",
+  "/assets/js/app/app.js",
+  "/assets/js/app/api.js",
+  "/assets/js/app/activity.js",
+  "/assets/js/app/audio.js",
+  "/assets/js/app/call.js",
+  "/assets/js/app/constants.js",
+  "/assets/js/app/dom.js",
+  "/assets/js/app/geo.js",
+  "/assets/js/app/notifications.js",
+  "/assets/js/app/sheet.js",
+  "/assets/js/app/state.js",
+  "/assets/js/app/storage.js",
+  "/assets/js/app/theme.js",
+  "/assets/js/app/utils.js",
+  "/assets/manifest.webmanifest",
+  "/assets/icon.svg",
+];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(

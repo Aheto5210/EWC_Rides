@@ -9,6 +9,12 @@ This is a lightweight “no-login” web app for church members (mobile-first):
 
 Most active days: **Tuesday / Thursday / Sunday**.
 
+## Project layout
+
+- Backend: `server/index.js`
+- Frontend (static): `public/`
+- Frontend assets: `public/assets/`
+
 ## Run locally
 
 ```bash
@@ -33,6 +39,10 @@ npm run dev:lan:https
 ```
 
 Then open the printed `https://<LAN_IP>:3443` URL on your phone.
+
+### Optional: custom request sound
+
+If you want a custom alert sound, add an MP3 file at `public/assets/notify.mp3`.
 
 ## Optional server config
 

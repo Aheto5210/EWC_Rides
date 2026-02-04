@@ -4,12 +4,12 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "node --watch server.js",
-    "dev:lan": "HOST=0.0.0.0 node --watch server.js",
-    "dev:https": "HTTPS=1 node --watch server.js",
-    "dev:lan:https": "HOST=0.0.0.0 HTTPS=1 node --watch server.js",
+    "dev": "node --watch server/index.js",
+    "dev:lan": "HOST=0.0.0.0 node --watch server/index.js",
+    "dev:https": "HTTPS=1 node --watch server/index.js",
+    "dev:lan:https": "HOST=0.0.0.0 HTTPS=1 node --watch server/index.js",
     "cert": "node scripts/gen-dev-cert.mjs",
-    "start": "node server.js"
+    "start": "node server/index.js"
   },
   "engines": {
     "node": ">=20"
