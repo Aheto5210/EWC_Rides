@@ -12,6 +12,7 @@
   --radius: 16px;
   --danger: #d14b4b;
   --success: #2bd576;
+  --accent: #ff8a2a;
   --warning: #f5c451;
   --info: #5aa3ff;
   --tabs-bg: rgba(11, 11, 12, 0.72);
@@ -23,6 +24,7 @@
   --input-bg: rgba(0, 0, 0, 0.25);
   --focus-ring: rgba(255, 255, 255, 0.06);
   --success-text: #d5ffe7;
+  --accent-text: #fff3e8;
   --notice-bg: rgba(255, 255, 255, 0.04);
   --ease: cubic-bezier(0.2, 0.9, 0.2, 1);
   --ease-soft: cubic-bezier(0.2, 0.6, 0.2, 1);
@@ -51,6 +53,7 @@
   --input-bg: rgba(255, 255, 255, 0.9);
   --focus-ring: rgba(11, 11, 12, 0.08);
   --success-text: #0b1f14;
+  --accent-text: #2b1606;
   --notice-bg: rgba(11, 11, 12, 0.04);
 }
 
@@ -112,6 +115,12 @@ body {
 .tabs__main {
   display: flex;
   flex: 1;
+  gap: 6px;
+}
+
+.tabs__actions {
+  display: flex;
+  align-items: center;
   gap: 6px;
 }
 
@@ -206,6 +215,13 @@ body {
   margin-bottom: 12px;
 }
 
+.card__divider {
+  height: 1px;
+  background: var(--border);
+  margin: 14px 0;
+  border-radius: 999px;
+}
+
 .field {
   display: grid;
   gap: 6px;
@@ -292,6 +308,17 @@ body {
   color: var(--success-text);
 }
 
+.btn--accent {
+  background: rgba(255, 138, 42, 0.16);
+  border-color: rgba(255, 138, 42, 0.38);
+  color: var(--accent-text);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.btn--accent:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
 .btn--ghost {
   background: transparent;
 }
@@ -305,6 +332,12 @@ body {
   padding: 16px 14px;
   font-size: 16px;
   border-radius: 16px;
+}
+
+.btn--sm {
+  padding: 10px 12px;
+  font-size: 13px;
+  border-radius: 14px;
 }
 
 .muted {
@@ -710,6 +743,22 @@ body {
   border: 1px solid var(--border);
   border-radius: 22px 22px 0 0;
   box-shadow: var(--shadow);
+  min-height: 46vh;
+  max-height: 78vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.sheet__panel::before {
+  content: "";
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  width: 52px;
+  height: 5px;
+  transform: translateX(-50%);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
 }
 
 @media (min-width: 560px) {
@@ -719,6 +768,8 @@ body {
   }
   .sheet__panel {
     border-radius: 22px;
+    min-height: unset;
+    max-height: unset;
   }
 }
 
@@ -738,6 +789,9 @@ body {
   display: grid;
   gap: 12px;
   margin-top: 12px;
+  flex: 1;
+  overflow: auto;
+  padding-bottom: 4px;
 }
 
 .sheet__actions {

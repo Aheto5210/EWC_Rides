@@ -1,6 +1,14 @@
 import { STORAGE_KEYS } from "./constants.js";
 import { api } from "./api.js";
 import { addActivity, clearActivity, renderActivity } from "./activity.js";
+import {
+  clearDriverAuth,
+  getDriverMe,
+  loginDriver,
+  resolveDriverLogin,
+  registerDriver,
+  saveDriverAuth,
+} from "./auth.js";
 import { createAudio } from "./audio.js";
 import { callButtonHtml } from "./call.js";
 import { els } from "./dom.js";
@@ -27,7 +35,15 @@ const state = createState();
 initTheme({ state, els });
 
 const sheet = createSheet(state, els);
-const { closeSheet, promptRiderContact, promptDriverContact } = sheet;
+const {
+  closeSheet,
+  promptRiderContact,
+  promptDriverContact,
+  promptDriverRegister,
+  promptDriverCode,
+  promptDriverPick,
+  showDriverCode,
+} = sheet;
 
 const audio = createAudio({ state });
 const {
@@ -70,6 +86,83 @@ function disconnectStream() {
   stopRequestAlarm();
 }
 
+function clearEwcLocalStorage() {
+  try {
+    const keys = [];
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const k = localStorage.key(i);
+      if (!k) continue;
+      if (k.startsWith("ewc.")) keys.push(k);
+    }
+    for (const k of keys) localStorage.removeItem(k);
+  } catch {
+    // ignore
+  }
+}
+
+async function hardReload() {
+  els.btnReset.disabled = true;
+  els.btnReset.classList.add("link--loading");
+
+  try {
+    if (state.role === "driver" && state.driver.online) {
+      await setDriverOnline(false).catch(() => {});
+    }
+  } catch {
+    // ignore
+  }
+
+  try {
+    disconnectStream();
+  } catch {
+    // ignore
+  }
+
+  try {
+    stopGeoWatch();
+  } catch {
+    // ignore
+  }
+
+  try {
+    closeSheet();
+  } catch {
+    // ignore
+  }
+
+  try {
+    clearActivity(state, els);
+  } catch {
+    // ignore
+  }
+
+  // Clear app storage (localStorage), service worker + Cache Storage.
+  clearEwcLocalStorage();
+
+  try {
+    if ("serviceWorker" in navigator) {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.allSettled(regs.map((r) => r.unregister()));
+    }
+  } catch {
+    // ignore
+  }
+
+  try {
+    if ("caches" in window) {
+      const keys = await caches.keys();
+      await Promise.allSettled(keys.map((k) => caches.delete(k)));
+    }
+  } catch {
+    // ignore
+  }
+
+  // Bust any remaining in-memory state by doing a fresh navigation.
+  const u = new URL(location.href);
+  u.searchParams.set("r", String(Date.now()));
+  location.replace(u.toString());
+}
+
 function connectStream() {
   disconnectStream();
   const role = state.role === "driver" ? "driver" : "rider";
@@ -79,6 +172,9 @@ function connectStream() {
     id: state.deviceId,
   });
   if (state.roomCode) params.set("code", state.roomCode);
+  if (state.role === "driver" && state.driver.auth.token) {
+    params.set("token", state.driver.auth.token);
+  }
 
   state.eventSource = new EventSource(`/api/stream?${params.toString()}`);
 
@@ -207,6 +303,86 @@ function connectStream() {
   });
 }
 
+function driverAuthHeaders() {
+  const token = (state.driver.auth.token ?? "").trim();
+  if (!token) return {};
+  return { authorization: `Bearer ${token}` };
+}
+
+function saveDriverAuthState({ token, driver }) {
+  if (token) state.driver.auth.token = token;
+  if (driver?.phone) state.driver.auth.phone = digitsOnly(driver.phone);
+  if (driver?.name) state.driver.auth.name = String(driver.name || "").trim();
+  saveDriverAuth({
+    token: state.driver.auth.token,
+    phone: state.driver.auth.phone,
+    name: state.driver.auth.name,
+  });
+}
+
+function resetDriverAuthState() {
+  state.driver.auth.token = "";
+  state.driver.auth.phone = "";
+  state.driver.auth.name = "";
+  clearDriverAuth();
+}
+
+async function ensureDriverAuth({ interactive } = { interactive: false }) {
+  const token = (state.driver.auth.token ?? "").trim();
+  if (token) {
+    try {
+      const me = await getDriverMe(token);
+      saveDriverAuthState({ token, driver: me.driver });
+      return true;
+    } catch {
+      resetDriverAuthState();
+    }
+  }
+
+  if (!interactive) return false;
+
+  let phone = digitsOnly(
+    state.driver.auth.phone || localStorage.getItem(STORAGE_KEYS.driverAuthPhone) || "",
+  );
+
+  const entered = await promptDriverCode();
+  if (!entered) return false;
+
+  try {
+    const result = await loginDriver({
+      phone: isValidPhoneDigits(phone) ? phone : "",
+      code: entered.code,
+    });
+    saveDriverAuthState({ token: result.token, driver: result.driver });
+    return true;
+  } catch (e) {
+    if (e.message === "CODE_AMBIGUOUS" && Array.isArray(e.data?.choices)) {
+      const idx = await promptDriverPick(e.data.choices);
+      if (idx === null || typeof idx === "undefined") return false;
+      try {
+        const resolved = await resolveDriverLogin({
+          challengeId: e.data.challengeId,
+          choiceIndex: idx,
+        });
+        saveDriverAuthState({ token: resolved.token, driver: resolved.driver });
+        return true;
+      } catch (e2) {
+        alert(e2.message);
+        return false;
+      }
+    }
+
+    const msg =
+      e.message === "DRIVER_NOT_REGISTERED"
+        ? "Not registered yet. Tap “Register as a driver” first."
+        : e.message === "INVALID_CODE"
+          ? "Wrong code. Try again."
+          : e.message;
+    alert(msg);
+    return false;
+  }
+}
+
 function showRole(role) {
   state.role = role;
   localStorage.setItem(STORAGE_KEYS.role, role);
@@ -243,11 +419,11 @@ async function postDriverLocation() {
 
   await api("/api/driver/update", {
     method: "POST",
+    headers: driverAuthHeaders(),
     body: {
       room: state.room,
       code: state.roomCode || undefined,
       driverId: state.deviceId,
-      name: driverDisplayName(state.deviceId),
       lat: state.geo.last.lat,
       lng: state.geo.last.lng,
       accuracyM: state.geo.last.accuracyM,
@@ -273,21 +449,9 @@ function startDriverHeartbeat() {
   }, 10_000);
 }
 
-function getSavedDriverContact() {
-  const name = (localStorage.getItem(STORAGE_KEYS.driverName) ?? "").trim();
-  const phone = digitsOnly(localStorage.getItem(STORAGE_KEYS.driverPhone) ?? "");
-  if (!name) return null;
-  if (!isValidPhoneDigits(phone)) return null;
-  return { name, phone };
-}
-
 async function setDriverOnline(online) {
   if (online) {
-    const saved = getSavedDriverContact();
-    if (!saved) {
-      const entered = await promptDriverContact("Driver details", "Save & go online");
-      if (!entered) throw new Error("CANCELLED");
-    }
+    if (!(await ensureDriverAuth({ interactive: true }))) throw new Error("CANCELLED");
 
     await primeAlertAudio().catch(() => {});
     ensureNotificationPermission().catch(() => {});
@@ -299,11 +463,11 @@ async function setDriverOnline(online) {
 
     await api("/api/driver/start", {
       method: "POST",
+      headers: driverAuthHeaders(),
       body: {
         room: state.room,
         code: state.roomCode || undefined,
         driverId: state.deviceId,
-        name: driverDisplayName(state.deviceId),
       },
     });
 
@@ -313,8 +477,12 @@ async function setDriverOnline(online) {
     startDriverHeartbeat();
     addActivity(state, els, "Driver online", "You’re now visible to riders.", "success");
   } else {
+    if (!state.driver.auth.token) {
+      await ensureDriverAuth({ interactive: true }).catch(() => {});
+    }
     await api("/api/driver/stop", {
       method: "POST",
+      headers: driverAuthHeaders(),
       body: {
         room: state.room,
         code: state.roomCode || undefined,
@@ -400,22 +568,17 @@ function openMapsForRequest(req) {
   window.open(url, "_blank", "noopener,noreferrer");
 }
 
-async function acceptRequest(req, driverContact) {
-  const fallback = getSavedDriverContact();
-  const driverName = (driverContact?.name ?? fallback?.name ?? "").toString().trim();
-  const driverPhone = digitsOnly(driverContact?.phone ?? fallback?.phone ?? "");
-  if (!driverName) throw new Error("MISSING_DRIVER_NAME");
-  if (!isValidPhoneDigits(driverPhone)) throw new Error("INVALID_DRIVER_PHONE");
+async function acceptRequest(req) {
+  if (!(await ensureDriverAuth({ interactive: true }))) throw new Error("CANCELLED");
 
   const result = await api("/api/ride/accept", {
     method: "POST",
+    headers: driverAuthHeaders(),
     body: {
       room: state.room,
       code: state.roomCode || undefined,
       driverId: state.deviceId,
       requestId: req.id,
-      driverName,
-      driverPhone,
     },
   });
   const updated = result.request;
@@ -430,8 +593,10 @@ async function acceptRequest(req, driverContact) {
 }
 
 async function declineRequest(req) {
+  if (!(await ensureDriverAuth({ interactive: true }))) throw new Error("CANCELLED");
   await api("/api/ride/decline", {
     method: "POST",
+    headers: driverAuthHeaders(),
     body: {
       room: state.room,
       code: state.roomCode || undefined,
@@ -449,8 +614,10 @@ async function declineRequest(req) {
 }
 
 async function completeRequest(req) {
+  if (!(await ensureDriverAuth({ interactive: true }))) throw new Error("CANCELLED");
   await api("/api/ride/complete", {
     method: "POST",
+    headers: driverAuthHeaders(),
     body: {
       room: state.room,
       code: state.roomCode || undefined,
@@ -516,19 +683,10 @@ function driverRequestItem(req) {
   btnAccept.addEventListener("click", async () => {
     btnAccept.disabled = true;
     try {
-      let contact = getSavedDriverContact();
-      if (!contact) {
-        const entered = await promptDriverContact("Driver details", "Save");
-        if (!entered) return;
-        contact = { name: entered.name, phone: entered.phone };
-      }
-      await acceptRequest(req, contact);
+      await acceptRequest(req);
     } catch (e) {
-      const msg =
-        e.message === "INVALID_DRIVER_PHONE"
-          ? "Please enter a valid driver phone number."
-          : e.message;
-      alert(`Could not accept: ${msg}`);
+      if (e.message === "CANCELLED") return;
+      alert(`Could not accept: ${e.message}`);
     } finally {
       btnAccept.disabled = false;
     }
@@ -794,21 +952,50 @@ function initEvents() {
     }
   });
 
-  els.btnRoleDriver.addEventListener("click", () => showRole("driver"));
+  els.btnRoleDriver.addEventListener("click", async () => {
+    els.btnRoleDriver.disabled = true;
+    try {
+      const ok = await ensureDriverAuth({ interactive: true });
+      if (!ok) return;
+      showRole("driver");
+    } finally {
+      els.btnRoleDriver.disabled = false;
+    }
+  });
   els.btnRoleRider.addEventListener("click", () => showRole("rider"));
+  els.btnRegisterDriver.addEventListener("click", async () => {
+    els.btnRegisterDriver.disabled = true;
+    try {
+      const entered = await promptDriverRegister();
+      if (!entered) return;
+
+      const reg = await registerDriver({ name: entered.name, phone: entered.phone });
+      saveDriverAuthState({ token: "", driver: { name: entered.name, phone: entered.phone } });
+
+      await showDriverCode(reg.code || "");
+
+      try {
+        const login = await loginDriver({ phone: entered.phone, code: reg.code });
+        saveDriverAuthState({ token: login.token, driver: login.driver });
+        addActivity(state, els, "Driver registered", "You can now go online as a driver.", "success");
+      } catch {
+        // ignore auto-login errors; driver can login manually.
+      }
+      renderAll();
+    } catch (e) {
+      alert(`Could not register: ${e.message}`);
+    } finally {
+      els.btnRegisterDriver.disabled = false;
+    }
+  });
   els.btnSwitchToRider.addEventListener("click", clearRole);
   els.btnSwitchToDriver.addEventListener("click", clearRole);
 
   els.btnReset.addEventListener("click", () => {
-    clearActivity(state, els);
-    try {
-      closeSheet();
-    } catch {
-      // ignore
-    }
-    els.btnReset.disabled = true;
-    els.btnReset.classList.add("link--loading");
-    setTimeout(() => location.reload(), 160);
+    hardReload().catch(() => {
+      // Worst case fallback.
+      location.reload();
+    });
   });
 
   els.btnDriverToggle.addEventListener("click", async () => {
@@ -852,6 +1039,14 @@ async function init() {
 
   await primeLocation();
 
+  if (state.role === "driver") {
+    const ok = await ensureDriverAuth({ interactive: false });
+    if (!ok) {
+      state.role = "";
+      localStorage.removeItem(STORAGE_KEYS.role);
+    }
+  }
+
   if (state.role === "driver" || state.role === "rider") {
     els.roleCard.hidden = true;
     startGeoWatch();
@@ -869,4 +1064,3 @@ async function init() {
 }
 
 init();
-

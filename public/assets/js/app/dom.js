@@ -13,6 +13,7 @@ export const els = {
   roleCard: document.getElementById("roleCard"),
   btnRoleDriver: document.getElementById("btnRoleDriver"),
   btnRoleRider: document.getElementById("btnRoleRider"),
+  btnRegisterDriver: document.getElementById("btnRegisterDriver"),
   daysHint: document.getElementById("daysHint"),
   driverCard: document.getElementById("driverCard"),
   btnSwitchToRider: document.getElementById("btnSwitchToRider"),
@@ -37,4 +38,3 @@ export const els = {
   sheetCancel: document.getElementById("sheetCancel"),
   sheetConfirm: document.getElementById("sheetConfirm"),
 };
-

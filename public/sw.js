@@ -1,4 +1,4 @@
-const CACHE_NAME = "ewc-rides-v32";
+const CACHE_NAME = "ewc-rides-v40";
 const ASSETS = [
   "/",
   "/index.html",
@@ -6,6 +6,7 @@ const ASSETS = [
   "/assets/js/main.js",
   "/assets/js/app/app.js",
   "/assets/js/app/api.js",
+  "/assets/js/app/auth.js",
   "/assets/js/app/activity.js",
   "/assets/js/app/audio.js",
   "/assets/js/app/call.js",

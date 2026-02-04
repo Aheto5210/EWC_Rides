@@ -1,5 +1,6 @@
-export async function api(path, { method = "GET", body } = {}) {
-  const headers = { "content-type": "application/json" };
+export async function api(path, { method = "GET", body, headers: extraHeaders } = {}) {
+  const headers = { ...(extraHeaders || {}) };
+  if (body) headers["content-type"] = headers["content-type"] || "application/json";
   const res = await fetch(path, {
     method,
     headers,
@@ -15,4 +16,3 @@ export async function api(path, { method = "GET", body } = {}) {
   }
   return data;
 }
-

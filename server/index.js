@@ -1,6 +1,6 @@
 import http from "node:http";
 import https from "node:https";
-import { randomUUID } from "node:crypto";
+import { randomUUID, randomBytes } from "node:crypto";
 import os from "node:os";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -13,6 +13,13 @@ const PORT = Number(process.env.PORT ?? 3000);
 const PUBLIC_DIR = path.join(__dirname, "..", "public");
 
 const ROOM_CODE = (process.env.ROOM_CODE ?? "").trim() || null;
+const DRIVER_DB_FILE = path.join(__dirname, "data", "drivers.json");
+const DRIVER_SESSION_TTL_MS =
+  clampNumber(Number(process.env.DRIVER_SESSION_TTL_DAYS ?? 14), 1, 180) *
+  24 *
+  60 *
+  60 *
+  1_000;
 const MAX_PICKUP_MINUTES = clampNumber(
   Number(process.env.MAX_PICKUP_MINUTES ?? 10),
   1,
@@ -63,6 +70,35 @@ function json(res, statusCode, body) {
     "cache-control": "no-store",
   });
   res.end(payload);
+}
+
+function parseCookies(req) {
+  const header = (req.headers?.cookie ?? "").toString();
+  if (!header) return {};
+  const out = {};
+  for (const part of header.split(";")) {
+    const idx = part.indexOf("=");
+    if (idx === -1) continue;
+    const k = part.slice(0, idx).trim();
+    const v = part.slice(idx + 1).trim();
+    if (!k) continue;
+    out[k] = decodeURIComponent(v);
+  }
+  return out;
+}
+
+function setCookie(res, name, value, opts = {}) {
+  const parts = [`${name}=${encodeURIComponent(String(value))}`];
+  parts.push(`Path=${opts.path || "/"}`);
+  if (opts.maxAgeSeconds) parts.push(`Max-Age=${Math.floor(opts.maxAgeSeconds)}`);
+  parts.push(`SameSite=${opts.sameSite || "Lax"}`);
+  if (opts.httpOnly) parts.push("HttpOnly");
+  if (opts.secure) parts.push("Secure");
+  const cookie = parts.join("; ");
+  const prev = res.getHeader("Set-Cookie");
+  if (!prev) res.setHeader("Set-Cookie", cookie);
+  else if (Array.isArray(prev)) res.setHeader("Set-Cookie", [...prev, cookie]);
+  else res.setHeader("Set-Cookie", [String(prev), cookie]);
 }
 
 async function readBody(req) {
@@ -145,6 +181,76 @@ function sanitizePhone(phone) {
 
 function isValidPhone(phoneDigits) {
   return typeof phoneDigits === "string" && phoneDigits.length >= 7;
+}
+
+function last4(phoneDigits) {
+  const d = digitsOnly(phoneDigits);
+  return d.slice(Math.max(0, d.length - 4));
+}
+
+function makeToken() {
+  return randomBytes(24).toString("base64url");
+}
+
+async function ensureDir(dir) {
+  try {
+    await fs.mkdir(dir, { recursive: true });
+  } catch {
+    // ignore
+  }
+}
+
+async function readDriverDb() {
+  try {
+    const raw = await fs.readFile(DRIVER_DB_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return { drivers: {} };
+    if (!parsed.drivers || typeof parsed.drivers !== "object") return { drivers: {} };
+    return { drivers: parsed.drivers };
+  } catch {
+    return { drivers: {} };
+  }
+}
+
+async function writeDriverDb(db) {
+  await ensureDir(path.dirname(DRIVER_DB_FILE));
+  const tmp = `${DRIVER_DB_FILE}.${randomUUID()}.tmp`;
+  const payload = JSON.stringify(db, null, 2);
+  await fs.writeFile(tmp, payload, "utf8");
+  await fs.rename(tmp, DRIVER_DB_FILE);
+}
+
+const driverDb = await readDriverDb();
+const driverSessions = new Map(); // token -> { phone, name, createdAt, expiresAt }
+const loginChallenges = new Map(); // id -> { phones: string[], expiresAt: number }
+
+function getAuthToken(req, fallbackFromBody = null) {
+  const hdr = (req.headers?.authorization ?? "").toString().trim();
+  if (hdr.toLowerCase().startsWith("bearer ")) return hdr.slice(7).trim();
+  const tokenFromBody =
+    fallbackFromBody && typeof fallbackFromBody.token !== "undefined"
+      ? String(fallbackFromBody.token)
+      : "";
+  return tokenFromBody.trim();
+}
+
+function requireDriverSession(req, res, body = null) {
+  const token = getAuthToken(req, body);
+  if (!token) {
+    json(res, 401, { error: "DRIVER_AUTH_REQUIRED" });
+    return null;
+  }
+  const session = driverSessions.get(token);
+  if (!session) {
+    json(res, 401, { error: "DRIVER_AUTH_INVALID" });
+    return null;
+  }
+  if (session.expiresAt && session.expiresAt < nowMs()) {
+    driverSessions.delete(token);
+    json(res, 401, { error: "DRIVER_AUTH_EXPIRED" });
+    return null;
+  }
+  return { token, session };
 }
 
 function pickLanIp() {
@@ -450,11 +556,24 @@ const requestHandler = async (req, res) => {
     const role = sp.get("role") === "driver" ? "driver" : "rider";
     const deviceId = (sp.get("id") ?? "").trim().slice(0, 80);
     const code = (sp.get("code") ?? "").trim();
+    const token = (sp.get("token") ?? "").trim();
 
     if (!requireRoomCodeOr401(code, res)) return;
     if (!deviceId) {
       json(res, 400, { error: "MISSING_ID" });
       return;
+    }
+    if (role === "driver") {
+      const session = driverSessions.get(token);
+      if (!token || !session) {
+        json(res, 401, { error: "DRIVER_AUTH_REQUIRED" });
+        return;
+      }
+      if (session.expiresAt && session.expiresAt < nowMs()) {
+        driverSessions.delete(token);
+        json(res, 401, { error: "DRIVER_AUTH_EXPIRED" });
+        return;
+      }
     }
 
     const { id: roomId, state: roomState } = getRoomState(room);
@@ -488,15 +607,174 @@ const requestHandler = async (req, res) => {
     return;
   }
 
+  if (url.startsWith("/api/auth/driver/register") && method === "POST") {
+    const body = await readJson(req);
+    if (!body) return json(res, 400, { error: "INVALID_JSON" });
+
+    const name = sanitizeName(body.name);
+    const phone = sanitizePhone(body.phone);
+    if (!name) return json(res, 400, { error: "MISSING_NAME" });
+    if (!isValidPhone(phone)) return json(res, 400, { error: "INVALID_PHONE" });
+
+    const now = nowMs();
+    const existing = driverDb.drivers[phone];
+    driverDb.drivers[phone] = {
+      phone,
+      name,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
+    await writeDriverDb(driverDb);
+
+    setCookie(res, "ewc_driver_phone", phone, {
+      maxAgeSeconds: Math.floor(DRIVER_SESSION_TTL_MS / 1_000),
+      httpOnly: true,
+      sameSite: "Lax",
+      secure: false,
+    });
+
+    json(res, 201, {
+      ok: true,
+      driver: { name, phoneLast4: last4(phone) },
+      code: last4(phone),
+    });
+    return;
+  }
+
+  if (url.startsWith("/api/auth/driver/login") && method === "POST") {
+    const body = await readJson(req);
+    if (!body) return json(res, 400, { error: "INVALID_JSON" });
+
+    const cookies = parseCookies(req);
+    const phoneFromBody = sanitizePhone(body.phone);
+    const cookiePhone = sanitizePhone(cookies.ewc_driver_phone);
+    let phone = sanitizePhone(phoneFromBody || cookiePhone);
+    const code = digitsOnly(body.code).slice(0, 4);
+    if (!code || code.length !== 4) return json(res, 400, { error: "INVALID_CODE" });
+
+    if (!isValidPhone(phone)) {
+      const matches = [];
+      for (const [p] of Object.entries(driverDb.drivers)) {
+        if (last4(p) !== code) continue;
+        matches.push(p);
+      }
+
+      if (matches.length === 0) return json(res, 404, { error: "DRIVER_NOT_REGISTERED" });
+
+      if (matches.length === 1) {
+        phone = sanitizePhone(matches[0]);
+      } else {
+        const challengeId = makeToken();
+        loginChallenges.set(challengeId, {
+          phones: matches.map((p) => sanitizePhone(p)),
+          expiresAt: nowMs() + 5 * 60_000,
+        });
+        json(res, 409, {
+          error: "CODE_AMBIGUOUS",
+          challengeId,
+          choices: matches.map((p) => ({
+            name: driverDb.drivers[p]?.name ?? "Driver",
+          })),
+        });
+        return;
+      }
+    }
+
+    const record = driverDb.drivers[phone];
+    if (!record) return json(res, 404, { error: "DRIVER_NOT_REGISTERED" });
+    const expected = last4(phone);
+    if (code !== expected) return json(res, 401, { error: "INVALID_CODE" });
+
+    const token = makeToken();
+    const now = nowMs();
+    driverSessions.set(token, {
+      phone,
+      name: record.name,
+      createdAt: now,
+      expiresAt: now + DRIVER_SESSION_TTL_MS,
+    });
+
+    setCookie(res, "ewc_driver_phone", phone, {
+      maxAgeSeconds: Math.floor(DRIVER_SESSION_TTL_MS / 1_000),
+      httpOnly: true,
+      sameSite: "Lax",
+      secure: false,
+    });
+
+    json(res, 200, {
+      ok: true,
+      token,
+      driver: { name: record.name, phone, phoneLast4: expected },
+    });
+    return;
+  }
+
+  if (url.startsWith("/api/auth/driver/login/resolve") && method === "POST") {
+    const body = await readJson(req);
+    if (!body) return json(res, 400, { error: "INVALID_JSON" });
+
+    const challengeId = (body.challengeId ?? "").toString().trim();
+    const idx = Number(body.choiceIndex);
+    if (!challengeId) return json(res, 400, { error: "MISSING_CHALLENGE" });
+    if (!Number.isInteger(idx) || idx < 0) return json(res, 400, { error: "INVALID_CHOICE" });
+
+    const challenge = loginChallenges.get(challengeId);
+    if (!challenge) return json(res, 404, { error: "CHALLENGE_NOT_FOUND" });
+    if (challenge.expiresAt < nowMs()) {
+      loginChallenges.delete(challengeId);
+      return json(res, 410, { error: "CHALLENGE_EXPIRED" });
+    }
+
+    const phone = challenge.phones[idx];
+    if (!phone) return json(res, 400, { error: "INVALID_CHOICE" });
+
+    const record = driverDb.drivers[phone];
+    if (!record) return json(res, 404, { error: "DRIVER_NOT_REGISTERED" });
+
+    const token = makeToken();
+    const now = nowMs();
+    driverSessions.set(token, {
+      phone,
+      name: record.name,
+      createdAt: now,
+      expiresAt: now + DRIVER_SESSION_TTL_MS,
+    });
+    loginChallenges.delete(challengeId);
+
+    setCookie(res, "ewc_driver_phone", phone, {
+      maxAgeSeconds: Math.floor(DRIVER_SESSION_TTL_MS / 1_000),
+      httpOnly: true,
+      sameSite: "Lax",
+      secure: false,
+    });
+
+    json(res, 200, {
+      ok: true,
+      token,
+      driver: { name: record.name, phone, phoneLast4: last4(phone) },
+    });
+    return;
+  }
+
+  if (url.startsWith("/api/auth/driver/me") && method === "GET") {
+    const auth = requireDriverSession(req, res);
+    if (!auth) return;
+    const { phone, name } = auth.session;
+    json(res, 200, { ok: true, driver: { name, phone, phoneLast4: last4(phone) } });
+    return;
+  }
+
   if (url.startsWith("/api/driver/start") && method === "POST") {
     const body = await readJson(req);
     if (!body) return json(res, 400, { error: "INVALID_JSON" });
     if (!requireRoomCodeOr401(body.code, res)) return;
+    const auth = requireDriverSession(req, res, body);
+    if (!auth) return;
 
     const room = sanitizeRoom(body.room);
     const driverId = (body.driverId ?? "").toString().trim().slice(0, 80);
-    const name = sanitizeName(body.name);
     if (!driverId) return json(res, 400, { error: "MISSING_DRIVER_ID" });
+    const name = sanitizeName(auth.session.name);
 
     const { state: roomState } = getRoomState(room);
     const existing = roomState.drivers.get(driverId);
@@ -519,6 +797,8 @@ const requestHandler = async (req, res) => {
     const body = await readJson(req);
     if (!body) return json(res, 400, { error: "INVALID_JSON" });
     if (!requireRoomCodeOr401(body.code, res)) return;
+    const auth = requireDriverSession(req, res, body);
+    if (!auth) return;
 
     const room = sanitizeRoom(body.room);
     const driverId = (body.driverId ?? "").toString().trim().slice(0, 80);
@@ -535,13 +815,13 @@ const requestHandler = async (req, res) => {
     const existing = roomState.drivers.get(driverId);
     const driver = existing ?? {
       id: driverId,
-      name: sanitizeName(body.name),
+      name: sanitizeName(auth.session.name),
       available: true,
       last: null,
     };
 
     driver.available = true;
-    driver.name = sanitizeName(body.name ?? driver.name);
+    driver.name = sanitizeName(auth.session.name ?? driver.name);
     driver.last = {
       lat,
       lng,
@@ -561,6 +841,8 @@ const requestHandler = async (req, res) => {
     const body = await readJson(req);
     if (!body) return json(res, 400, { error: "INVALID_JSON" });
     if (!requireRoomCodeOr401(body.code, res)) return;
+    const auth = requireDriverSession(req, res, body);
+    if (!auth) return;
 
     const room = sanitizeRoom(body.room);
     const driverId = (body.driverId ?? "").toString().trim().slice(0, 80);
@@ -673,14 +955,16 @@ const requestHandler = async (req, res) => {
     const body = await readJson(req);
     if (!body) return json(res, 400, { error: "INVALID_JSON" });
     if (!requireRoomCodeOr401(body.code, res)) return;
+    const auth = requireDriverSession(req, res, body);
+    if (!auth) return;
 
     const room = sanitizeRoom(body.room);
     const driverId = (body.driverId ?? "").toString().trim().slice(0, 80);
     const requestId = (body.requestId ?? "").toString().trim();
-    const driverName = sanitizeName(body.driverName ?? body.name);
-    const driverPhone = sanitizePhone(body.driverPhone ?? body.phone);
     if (!driverId) return json(res, 400, { error: "MISSING_DRIVER_ID" });
     if (!requestId) return json(res, 400, { error: "MISSING_REQUEST_ID" });
+    const driverName = sanitizeName(auth.session.name);
+    const driverPhone = sanitizePhone(auth.session.phone);
     if (!isValidPhone(driverPhone)) return json(res, 400, { error: "INVALID_DRIVER_PHONE" });
 
     const { state: roomState } = getRoomState(room);
@@ -711,6 +995,8 @@ const requestHandler = async (req, res) => {
     const body = await readJson(req);
     if (!body) return json(res, 400, { error: "INVALID_JSON" });
     if (!requireRoomCodeOr401(body.code, res)) return;
+    const auth = requireDriverSession(req, res, body);
+    if (!auth) return;
 
     const room = sanitizeRoom(body.room);
     const driverId = (body.driverId ?? "").toString().trim().slice(0, 80);
@@ -735,6 +1021,8 @@ const requestHandler = async (req, res) => {
     const body = await readJson(req);
     if (!body) return json(res, 400, { error: "INVALID_JSON" });
     if (!requireRoomCodeOr401(body.code, res)) return;
+    const auth = requireDriverSession(req, res, body);
+    if (!auth) return;
 
     const room = sanitizeRoom(body.room);
     const driverId = (body.driverId ?? "").toString().trim().slice(0, 80);
