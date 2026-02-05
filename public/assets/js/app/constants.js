@@ -15,7 +15,7 @@ export const STORAGE_KEYS = {
   activity: "ewc.activity",
 };
 
-export const NOTIFY_AUDIO_URL = "/assets/notify.mp3";
+export const NOTIFY_AUDIO_URL = "/assets/drivernotify.mp3";
 
 export const CALL_ICON_SVG = `
   <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">

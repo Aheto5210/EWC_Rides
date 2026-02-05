@@ -110,6 +110,9 @@
           </div>
 
           <div id="riderActive" class="notice" hidden></div>
+          <button id="btnRequestNearest" class="btn btn--solidSuccess btn--block" type="button">
+            Request a ride
+          </button>
           <button
             id="btnCancelRequest"
             class="btn btn--danger btn--block"
@@ -121,7 +124,7 @@
 
           <div id="driversSectionTitle" class="sectionTitle">Available drivers</div>
           <div id="driversList" class="list"></div>
-          <div id="driversEmpty" class="muted">No drivers online right now.</div>
+          <div id="driversEmpty" class="muted">No available drivers right now.</div>
         </section>
       </div>
 
@@ -175,6 +178,8 @@
         </div>
       </div>
     </div>
+
+    <div id="toasts" class="toasts" aria-live="polite" aria-relevant="additions" aria-atomic="false"></div>
 
     <script type="module" src="/assets/js/main.js"></script>
   </body>

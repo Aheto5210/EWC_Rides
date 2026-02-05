@@ -9,7 +9,8 @@
     "dev:https": "HTTPS=1 node --watch server/index.js",
     "dev:lan:https": "HOST=0.0.0.0 HTTPS=1 node --watch server/index.js",
     "cert": "node scripts/gen-dev-cert.mjs",
-    "start": "node server/index.js"
+    "start": "node server/index.js",
+    "start:prod": "HOST=127.0.0.1 NODE_ENV=production node server/index.js"
   },
   "engines": {
     "node": ">=20"

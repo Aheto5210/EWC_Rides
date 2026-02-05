@@ -1,9 +1,10 @@
-const CACHE_NAME = "ewc-rides-v44";
+const CACHE_NAME = "ewc-rides-v81";
 const ASSETS = [
   "/",
   "/index.html",
   "/assets/css/styles.css",
   "/assets/js/main.js",
+  "/assets/drivernotify.mp3",
   "/assets/js/app/app.js",
   "/assets/js/app/api.js",
   "/assets/js/app/auth.js",

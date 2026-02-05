@@ -25,11 +25,18 @@ import {
   fmtAgeMs,
   fmtDistanceMi,
   fmtEtaMinutes,
+  fmtEtaSeconds,
   haversineKm,
   isValidPhoneDigits,
   kmToMi,
   mapsDirectionsUrl,
 } from "./utils.js";
+
+const MAPS_ICON_SVG = `
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path d="M21.71 11.29 13.7 3.28a1 1 0 0 0-1.41 0l-10 10a1 1 0 0 0 0 1.41l8.01 8.02a1 1 0 0 0 1.41 0l10-10a1 1 0 0 0 0-1.43ZM13 20.59 4.41 12 13 3.41 21.59 12 13 20.59ZM12 7a1 1 0 0 0-1 1v3.59l-1.3-1.3a1 1 0 1 0-1.4 1.42l3 3a1 1 0 0 0 1.4 0l3-3a1 1 0 0 0-1.4-1.42L13 11.59V8a1 1 0 0 0-1-1Z"/>
+  </svg>
+`;
 
 const state = createState();
 initTheme({ state, els });
@@ -54,8 +61,17 @@ const {
   stopRequestAlarm,
 } = audio;
 
-const notifications = createNotifications({ state });
-const { ensureNotificationPermission, showDriverNotification } = notifications;
+const notifications = createNotifications({ state, els });
+const { ensureNotificationPermission, showDriverNotification, showToast } = notifications;
+
+function notify({ title, body, tone = "info", tag = "", durationMs } = {}) {
+  if (typeof showToast === "function") {
+    showToast({ title, body, tone, tag, durationMs });
+    return;
+  }
+  // Fallback (should rarely happen).
+  alert(body ? `${title || "Notice"}\n\n${body}` : String(title || body || ""));
+}
 
 const geo = createGeo({ state, els, onChange: handleGeoChange });
 const { setLocationText, primeLocation, startGeoWatch, stopGeoWatch } = geo;
@@ -296,15 +312,7 @@ function connectStream() {
     }
 
     if (state.role === "rider" && state.rider.assignedRequestId === id) {
-      const label =
-        reason === "completed"
-          ? "Pickup completed"
-          : reason === "cancelled"
-            ? "Pickup cancelled"
-            : reason === "declined"
-              ? "Pickup declined"
-              : "Pickup update";
-      addActivity(state, els, label, "This ride is no longer active.", "info");
+      addActivity(state, els, "Ride update", "This ride is no longer active.", "info");
       state.rider.assignedRequestId = "";
       state.rider.assignedDriverId = "";
       state.rider.tracking.lastKm = null;
@@ -388,18 +396,18 @@ async function ensureDriverAuth({ interactive } = { interactive: false }) {
         saveDriverAuthState({ token: resolved.token, driver: resolved.driver });
         return true;
       } catch (e2) {
-        alert(e2.message);
+        notify({ title: "Driver access", body: e2.message, tone: "danger", durationMs: 5000 });
         return false;
       }
     }
 
     const msg =
       e.message === "DRIVER_NOT_REGISTERED"
-        ? "Not registered yet. Tap “Register as a driver” first."
+        ? "Not registered yet. Tap “Register” (top right) first."
         : e.message === "INVALID_CODE"
           ? "Wrong code. Try again."
           : e.message;
-    alert(msg);
+    notify({ title: "Driver access", body: msg, tone: "danger", durationMs: 5000 });
     return false;
   }
 }
@@ -475,6 +483,7 @@ async function setDriverOnline(online) {
     if (!(await ensureDriverAuth({ interactive: true }))) throw new Error("CANCELLED");
 
     await primeAlertAudio().catch(() => {});
+    // In-app notifications only (no browser permission prompt).
     ensureNotificationPermission().catch(() => {});
 
     if (!state.geo.last) {
@@ -496,7 +505,6 @@ async function setDriverOnline(online) {
     startGeoWatch();
     await postDriverLocation().catch(() => {});
     startDriverHeartbeat();
-    addActivity(state, els, "Driver online", "You’re now visible to riders.", "success");
   } else {
     if (!state.driver.auth.token) {
       await ensureDriverAuth({ interactive: true }).catch(() => {});
@@ -512,7 +520,6 @@ async function setDriverOnline(online) {
     });
     state.driver.online = false;
     stopDriverHeartbeat();
-    addActivity(state, els, "Driver offline", "You stopped sharing your location.", "danger");
   }
 
   updateRequestAlarm();
@@ -547,7 +554,7 @@ async function requestPickup(targetDriverId, riderContact) {
       phone: riderPhone,
       lat: state.geo.last.lat,
       lng: state.geo.last.lng,
-      targetDriverId,
+      targetDriverId: targetDriverId || undefined,
       note: "",
     },
   });
@@ -556,7 +563,8 @@ async function requestPickup(targetDriverId, riderContact) {
   state.rider.requestId = req.id;
   localStorage.setItem(STORAGE_KEYS.riderRequestId, req.id);
   state.live.requests.set(req.id, req);
-  addActivity(state, els, "Ride requested", `To ${req.targetDriverName || "driver"}.`, "info");
+  const label = req.targetDriverName ? `To ${req.targetDriverName}.` : "To nearest driver.";
+  addActivity(state, els, "Ride requested", label, "info");
   renderAll();
 }
 
@@ -634,23 +642,6 @@ async function declineRequest(req) {
   renderAll();
 }
 
-async function completeRequest(req) {
-  if (!(await ensureDriverAuth({ interactive: true }))) throw new Error("CANCELLED");
-  await api("/api/ride/complete", {
-    method: "POST",
-    headers: driverAuthHeaders(),
-    body: {
-      room: state.room,
-      code: state.roomCode || undefined,
-      driverId: state.deviceId,
-      requestId: req.id,
-    },
-  });
-  state.live.requests.delete(req.id);
-  addActivity(state, els, "Pickup completed", `Finished pickup for ${req.name || "rider"}.`, "success");
-  renderAll();
-}
-
 function driverRequestItem(req) {
   const created = new Date(req.createdAt).toLocaleTimeString(undefined, {
     hour: "2-digit",
@@ -689,8 +680,7 @@ function driverRequestItem(req) {
       ${isPending ? `<button class="btn btn--danger" data-action="decline">Decline</button>` : ""}
       ${
         isAssigned
-          ? `<button class="btn" data-action="maps">Open Google Maps</button>
-             <button class="btn btn--ghost" data-action="done">Done</button>`
+          ? `<button class="btn btn--withIcon" data-action="maps">${MAPS_ICON_SVG}<span>Start Ride</span></button>`
           : ""
       }
     </div>
@@ -699,7 +689,6 @@ function driverRequestItem(req) {
   const btnAccept = el.querySelector('[data-action="accept"]');
   const btnDecline = el.querySelector('[data-action="decline"]');
   const btnMaps = el.querySelector('[data-action="maps"]');
-  const btnDone = el.querySelector('[data-action="done"]');
 
   btnAccept.addEventListener("click", async () => {
     btnAccept.disabled = true;
@@ -707,7 +696,7 @@ function driverRequestItem(req) {
       await acceptRequest(req);
     } catch (e) {
       if (e.message === "CANCELLED") return;
-      alert(`Could not accept: ${e.message}`);
+      notify({ title: "Could not accept", body: e.message, tone: "danger", durationMs: 5000 });
     } finally {
       btnAccept.disabled = false;
     }
@@ -720,7 +709,7 @@ function driverRequestItem(req) {
       try {
         await declineRequest(req);
       } catch (e) {
-        alert(`Could not decline: ${e.message}`);
+        notify({ title: "Could not decline", body: e.message, tone: "danger", durationMs: 5000 });
       } finally {
         btnDecline.disabled = false;
       }
@@ -729,27 +718,17 @@ function driverRequestItem(req) {
 
   if (btnMaps) btnMaps.addEventListener("click", () => openMapsForRequest(req));
 
-  if (btnDone) btnDone.addEventListener("click", async () => {
-    btnDone.disabled = true;
-    try {
-      await completeRequest(req);
-    } catch (e) {
-      alert(`Could not complete: ${e.message}`);
-    } finally {
-      btnDone.disabled = false;
-    }
-  });
-
   return el;
 }
 
-function driverListItem(driver) {
+function driverListItem(driver, { showRequest = true } = {}) {
   const el = document.createElement("div");
   el.className = "item";
   const updatedAt = driver.last?.updatedAt ?? 0;
   const age = updatedAt ? fmtAgeMs(Date.now() - updatedAt) : "—";
   let distLabel = "—";
   let etaLabel = "—";
+  let isTooFar = false;
 
   if (state.geo.last && driver.last) {
     const km = haversineKm(state.geo.last.lat, state.geo.last.lng, driver.last.lat, driver.last.lng);
@@ -757,52 +736,70 @@ function driverListItem(driver) {
     distLabel = fmtDistanceMi(mi);
     const speedKmhRaw = Number(state.config?.assumedSpeedKmh);
     const speedKmh = Number.isFinite(speedKmhRaw) ? speedKmhRaw : 40;
-    etaLabel = fmtEtaMinutes(etaMinutesFromKm(km, speedKmh));
+    const eta = etaMinutesFromKm(km, speedKmh);
+    etaLabel = fmtEtaMinutes(eta);
+    const maxMinutesRaw = Number(state.config?.maxPickupMinutes);
+    const maxMinutes = Number.isFinite(maxMinutesRaw) ? maxMinutesRaw : 10;
+    isTooFar = Number.isFinite(eta) && eta > maxMinutes;
   }
 
   const hasActive = Boolean(getActiveRiderRequest());
-  const disabled = state.rider.locked || hasActive || !state.geo.last || !driver.last;
+  const disabled = state.rider.locked || hasActive || !state.geo.last || !driver.last || isTooFar;
 
   el.innerHTML = `
     <div class="item__top">
       <div>
         <div class="item__title">${escapeHtml(driver.name)}</div>
-        <div class="item__meta">${escapeHtml(etaLabel)} • ${escapeHtml(distLabel)} away • updated ${escapeHtml(age)}</div>
+        <div class="item__meta">${escapeHtml(etaLabel)} away • updated ${escapeHtml(
+          age,
+        )}</div>
       </div>
       <div class="badge badge--online"><span class="dot dot--online"></span>Online</div>
     </div>
-    <div class="item__actions">
-      <button class="btn btn--primary" data-action="request" ${disabled ? "disabled" : ""}>Request pickup</button>
-    </div>
+    ${
+      showRequest
+        ? `<div class="item__actions">
+            <button class="btn btn--primary" data-action="request" ${disabled ? "disabled" : ""}>${
+              isTooFar ? "Too far" : "Request pickup"
+            }</button>
+          </div>`
+        : ""
+    }
   `;
 
-  const btn = el.querySelector('[data-action="request"]');
-  btn.addEventListener("click", async () => {
-    btn.disabled = true;
-    try {
-      const contact = await promptRiderContact(driver.name);
-      if (!contact) return;
-      await requestPickup(driver.id, { name: contact.name, phone: contact.phone });
-    } catch (e) {
-      const maxMinutesRaw = Number(state.config?.maxPickupMinutes);
-      const maxMinutes = Number.isFinite(maxMinutesRaw) ? maxMinutesRaw : 10;
-      const msg =
-        e.message === "RIDER_LOCKED"
-          ? "This request was already accepted. Reload the page to start a new request."
-          : e.message === "LOCATION_REQUIRED"
-            ? "Enable location to request a ride."
-            : e.message === "DRIVER_AT_CAPACITY"
-              ? `This driver already has ${(e.data && e.data.capacity) || 3} requests. Please pick another driver.`
-              : e.message === "TOO_FAR"
-                ? `This driver is more than ${maxMinutes} minutes away.`
-                : e.message === "INVALID_RIDER_PHONE"
-                  ? "Please enter a valid phone number."
-                  : e.message;
-      alert(msg);
-    } finally {
-      btn.disabled = false;
-    }
-  });
+  if (showRequest) {
+    const btn = el.querySelector('[data-action="request"]');
+    btn?.addEventListener("click", async () => {
+      btn.disabled = true;
+      try {
+        const contact = await promptRiderContact(driver.name);
+        if (!contact) return;
+        await requestPickup(driver.id, { name: contact.name, phone: contact.phone });
+      } catch (e) {
+        const maxMinutesRaw = Number(state.config?.maxPickupMinutes);
+        const maxMinutes = Number.isFinite(maxMinutesRaw) ? maxMinutesRaw : 10;
+        const msg =
+          e.message === "RIDER_LOCKED"
+            ? "This request was already accepted. Reload the page to start a new request."
+            : e.message === "LOCATION_REQUIRED"
+              ? "Enable location to request a ride."
+              : e.message === "DRIVER_AT_CAPACITY"
+                ? `This driver already has ${(e.data && e.data.capacity) || 3} requests. Please pick another driver.`
+                : e.message === "TOO_FAR"
+                  ? `This driver is more than ${maxMinutes} minutes away.`
+                  : e.message === "INVALID_RIDER_PHONE"
+                    ? "Please enter a valid phone number."
+                    : e.message === "RIDER_PHONE_RESERVED"
+                      ? "That phone number belongs to an active driver right now. You can call them, but enter your own number for your request."
+                      : e.message === "RIDER_PHONE_IN_USE"
+                        ? "That phone number already has an active ride request (likely from another device). Use a different number or wait for it to expire."
+                    : e.message;
+        notify({ title: "Request pickup", body: msg, tone: "danger", durationMs: 5500 });
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  }
 
   return el;
 }
@@ -829,20 +826,26 @@ function renderDriverView() {
 function renderRiderView() {
   if (state.role !== "rider") return;
 
-  if (els.driversSectionTitle) els.driversSectionTitle.hidden = false;
   const active = getActiveRiderRequest();
   if (active) {
-    if (els.driversSectionTitle) els.driversSectionTitle.hidden = true;
     els.riderActive.hidden = false;
     els.btnCancelRequest.hidden = false;
+    if (els.btnRequestNearest) els.btnRequestNearest.hidden = true;
+    if (els.driversSectionTitle) els.driversSectionTitle.hidden = true;
+    if (els.driversList) els.driversList.innerHTML = "";
+    if (els.driversEmpty) els.driversEmpty.hidden = true;
     if (active.status === "pending") {
       const ttlMinRaw = Number(state.config?.requestTtlMinutes);
       const ttlMin = Number.isFinite(ttlMinRaw) ? ttlMinRaw : 5;
       const ageMin = Math.max(0, (Date.now() - Number(active.createdAt || 0)) / 60_000);
       const remainingMin = Math.max(0, Math.ceil(ttlMin - ageMin));
+      const closestTag = active.note === "auto" ? " (closest)" : "";
       els.riderActive.innerHTML = `
         <div class="notice__title">Request sent</div>
-        <div class="notice__text">Waiting for ${escapeHtml(active.targetDriverName || "driver")} to accept…</div>
+        <div class="notice__text">Sent to <strong>${escapeHtml(
+          active.targetDriverName || "driver",
+        )}</strong>${escapeHtml(closestTag)}</div>
+        <div class="notice__text">Waiting for driver to accept…</div>
         <div class="notice__text">Expires in ~${escapeHtml(remainingMin)} min</div>
       `;
     } else {
@@ -851,27 +854,29 @@ function renderRiderView() {
         <div class="notice__text">Status: ${escapeHtml(active.status)}</div>
       `;
     }
-
-    els.driversList.innerHTML = "";
-    els.driversEmpty.textContent = "";
-    els.driversEmpty.hidden = true;
     return;
   } else {
     els.riderActive.hidden = true;
     els.btnCancelRequest.hidden = true;
+    if (els.btnRequestNearest) els.btnRequestNearest.hidden = false;
   }
 
   if (state.rider.locked) {
-    if (els.driversSectionTitle) els.driversSectionTitle.hidden = true;
     els.riderActive.hidden = false;
+    if (els.btnRequestNearest) els.btnRequestNearest.hidden = true;
+    if (els.driversSectionTitle) els.driversSectionTitle.hidden = true;
+    if (els.driversList) els.driversList.innerHTML = "";
+    if (els.driversEmpty) els.driversEmpty.hidden = true;
     const phoneDigits = digitsOnly(state.rider.assigned?.phone || "");
     const driverName = state.rider.assigned?.name || "driver";
+
     const driverId = state.rider.assignedDriverId || "";
     const driver = driverId ? state.live.drivers.get(driverId) : null;
     const updatedAt = driver?.last?.updatedAt ?? 0;
     const age = updatedAt ? fmtAgeMs(Date.now() - updatedAt) : "—";
 
     let etaLabel = "—";
+    let etaExactLabel = "";
     let statusText = "Driver is on the way";
     let statusTone = "info";
 
@@ -887,6 +892,9 @@ function renderRiderView() {
         statusTone = "success";
       } else {
         etaLabel = fmtEtaMinutes(eta);
+        if (Number.isFinite(etaSec) && etaSec <= 10 * 60) {
+          etaExactLabel = fmtEtaSeconds(etaSec);
+        }
       }
 
       const prevKm = state.rider.tracking.lastKm;
@@ -934,6 +942,7 @@ function renderRiderView() {
         <div class="statChip">
           <div class="statChip__label">Time</div>
           <div class="statChip__value">${escapeHtml(etaLabel)}</div>
+          ${etaExactLabel ? `<div class="statChip__sub">${escapeHtml(etaExactLabel)}</div>` : ""}
         </div>
       </div>
       <div class="statusTag statusTag--${escapeHtml(statusTone)}">${escapeHtml(statusText)}</div>
@@ -941,21 +950,21 @@ function renderRiderView() {
         age,
       )} ago • Accepted: ${escapeHtml(String(sinceMin))} min ago</div>
     `;
-    els.driversList.innerHTML = "";
-    els.driversEmpty.textContent = "";
-    els.driversEmpty.hidden = true;
     return;
   }
 
   if (!state.geo.last) {
-    els.driversList.innerHTML = "";
-    els.driversEmpty.textContent = "Enable location to see drivers within 10 minutes.";
-    els.driversEmpty.hidden = false;
+    if (els.driversSectionTitle) els.driversSectionTitle.hidden = false;
+    if (els.driversList) els.driversList.innerHTML = "";
+    if (els.driversEmpty) {
+      els.driversEmpty.textContent = "Enable location to see available drivers.";
+      els.driversEmpty.hidden = false;
+    }
     return;
   }
 
-  const maxMinutesRaw = Number(state.config?.maxPickupMinutes);
-  const maxMinutes = Number.isFinite(maxMinutesRaw) ? maxMinutesRaw : 10;
+  if (els.driversSectionTitle) els.driversSectionTitle.hidden = false;
+
   const speedKmhRaw = Number(state.config?.assumedSpeedKmh);
   const speedKmh = Number.isFinite(speedKmhRaw) ? speedKmhRaw : 40;
 
@@ -966,15 +975,23 @@ function renderRiderView() {
       const eta = etaMinutesFromKm(km, speedKmh);
       return { driver: d, eta };
     })
-    .filter(({ eta }) => Number.isFinite(eta) && eta <= maxMinutes)
-    .sort((a, b) => a.eta - b.eta)
+    .sort((a, b) => {
+      const aEta = Number.isFinite(a.eta) ? a.eta : Number.POSITIVE_INFINITY;
+      const bEta = Number.isFinite(b.eta) ? b.eta : Number.POSITIVE_INFINITY;
+      return aEta - bEta;
+    })
+    .slice(0, 5)
     .map(({ driver }) => driver);
 
-  els.driversList.innerHTML = "";
-  for (const d of drivers) els.driversList.appendChild(driverListItem(d));
-  els.driversEmpty.textContent =
-    drivers.length > 0 ? "" : `No drivers within ${maxMinutes} minutes right now.`;
-  els.driversEmpty.hidden = drivers.length > 0;
+  if (els.driversList) {
+    els.driversList.innerHTML = "";
+    for (const d of drivers) els.driversList.appendChild(driverListItem(d, { showRequest: false }));
+  }
+
+  if (els.driversEmpty) {
+    els.driversEmpty.textContent = drivers.length > 0 ? "" : "No available drivers right now.";
+    els.driversEmpty.hidden = drivers.length > 0;
+  }
 }
 
 function renderAll() {
@@ -989,6 +1006,19 @@ function renderAll() {
   if (els.reloadHint) els.reloadHint.hidden = !(state.role === "rider" && state.rider.locked);
   renderDriverView();
   renderRiderView();
+}
+
+function showRiderLoader({ title = "Working…", message = "" } = {}) {
+  if (state.role !== "rider") return;
+  if (!els.riderActive) return;
+  els.riderActive.hidden = false;
+  els.riderActive.innerHTML = `
+    <div class="notice__title">${escapeHtml(title)}</div>
+    <div class="notice__row">
+      <span class="spinner" aria-hidden="true"></span>
+      <span>${escapeHtml(message)}</span>
+    </div>
+  `;
 }
 
 function initEvents() {
@@ -1047,6 +1077,27 @@ function initEvents() {
       const ok = await ensureDriverAuth({ interactive: true });
       if (!ok) return;
       showRole("driver");
+      // After successful driver login, go online automatically.
+      try {
+        await setDriverOnline(true);
+      } catch (e) {
+        if (e?.message === "CANCELLED") return;
+        if (e?.message === "LOCATION_REQUIRED") {
+          notify({
+            title: "Location needed",
+            body: "Enable location to go online as a driver.",
+            tone: "warning",
+            durationMs: 6000,
+          });
+          return;
+        }
+        notify({
+          title: "Could not go online",
+          body: String(e?.message || e),
+          tone: "danger",
+          durationMs: 6000,
+        });
+      }
     } finally {
       els.btnRoleDriver.disabled = false;
     }
@@ -1066,7 +1117,6 @@ function initEvents() {
       try {
         const login = await loginDriver({ phone: entered.phone, code: reg.code });
         saveDriverAuthState({ token: login.token, driver: login.driver });
-        addActivity(state, els, "Driver registered", "You can now go online as a driver.", "success");
       } catch {
         // ignore auto-login errors; driver can login manually.
       }
@@ -1078,7 +1128,7 @@ function initEvents() {
           : e.message === "CODE_IN_USE"
             ? "This code is already in use by another driver. Please use a different phone number."
             : e.message;
-      alert(`Could not register: ${msg}`);
+      notify({ title: "Register", body: msg, tone: "danger", durationMs: 6000 });
     } finally {
       els.btnRegisterDriver.disabled = false;
     }
@@ -1100,7 +1150,7 @@ function initEvents() {
     } catch (e) {
       if (e.message === "CANCELLED") return;
       const msg = e.message === "LOCATION_REQUIRED" ? "Enable location to go online." : e.message;
-      alert(msg);
+      notify({ title: "Driver", body: msg, tone: "danger", durationMs: 5000 });
     } finally {
       els.btnDriverToggle.disabled = false;
     }
@@ -1111,9 +1161,71 @@ function initEvents() {
     try {
       await cancelPickup();
     } catch (e) {
-      alert(`Could not cancel: ${e.message}`);
+      notify({ title: "Could not cancel", body: e.message, tone: "danger", durationMs: 5000 });
     } finally {
       els.btnCancelRequest.disabled = false;
+    }
+  });
+
+  els.btnRequestNearest?.addEventListener("click", async () => {
+    els.btnRequestNearest.disabled = true;
+    try {
+      if (state.rider.locked) throw new Error("RIDER_LOCKED");
+      const existing = getActiveRiderRequest();
+      if (existing) return;
+
+      showRiderLoader({ title: "Requesting a ride", message: "Finding the nearest driver…" });
+
+      if (!state.geo.last) await primeLocation();
+      if (!state.geo.last) throw new Error("LOCATION_REQUIRED");
+
+      const match = await api("/api/ride/match", {
+        method: "POST",
+        body: {
+          room: state.room,
+          code: state.roomCode || undefined,
+          lat: state.geo.last.lat,
+          lng: state.geo.last.lng,
+        },
+      });
+
+      const driver = match?.driver;
+      if (!driver?.id) throw new Error("NO_DRIVERS");
+
+      showRiderLoader({ title: "Driver found", message: `Connecting you to ${driver.name || "a driver"}…` });
+      const contact = await promptRiderContact(driver.name || "driver");
+      if (!contact) return;
+
+      showRiderLoader({ title: "Sending request", message: "Just a moment…" });
+      await requestPickup(driver.id, { name: contact.name, phone: contact.phone });
+    } catch (e) {
+      const maxMinutesRaw = Number(state.config?.maxPickupMinutes);
+      const maxMinutes = Number.isFinite(maxMinutesRaw) ? maxMinutesRaw : 10;
+      const msg =
+        e.message === "RIDER_LOCKED"
+          ? "This request was already accepted. Reload the page to start a new request."
+          : e.message === "LOCATION_REQUIRED"
+            ? "Enable location to request a ride."
+            : e.message === "NO_DRIVERS"
+              ? "No available drivers right now."
+              : e.message === "TOO_FAR"
+                ? `No drivers within ${maxMinutes} minutes right now.`
+                : e.message === "RIDER_PHONE_RESERVED"
+                  ? "That phone number belongs to an active driver right now. You can call them, but enter your own number for your request."
+                  : e.message === "RIDER_PHONE_IN_USE"
+                    ? "That phone number already has an active ride request (likely from another device). Use a different number or wait for it to expire."
+                : e.message;
+      notify({
+        title: "Request a ride",
+        body: msg,
+        tone: "danger",
+        tag: "rider-request",
+        durationMs: 5500,
+      });
+    } finally {
+      els.btnRequestNearest.disabled = false;
+      // If we didn't create a request, restore the normal rider view.
+      if (!getActiveRiderRequest() && !state.rider.locked) renderRiderView();
     }
   });
 }

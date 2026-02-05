@@ -59,51 +59,68 @@ export function createAudio({ state } = {}) {
     }
   }
 
-  function playBellWebAudio() {
+  function playAttentionWebAudio() {
     const ctx = ensureAudioContext();
     if (!ctx) return;
     if (ctx.state === "suspended") ctx.resume().catch(() => {});
 
     const t0 = ctx.currentTime + 0.02;
-    const out = ctx.createGain();
-    out.gain.setValueAtTime(0.0001, t0);
-    out.connect(ctx.destination);
 
-    // Simple bell-ish chime: a few partials with fast attack + exponential decay.
-    const partials = [
-      { f: 880, a: 0.11, d: 0.9 },
-      { f: 1320, a: 0.075, d: 0.7 },
-      { f: 1760, a: 0.05, d: 0.55 },
-    ];
+    const master = ctx.createGain();
+    master.gain.setValueAtTime(0.0001, t0);
 
-    for (const p of partials) {
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.setValueAtTime(-18, t0);
+    comp.knee.setValueAtTime(20, t0);
+    comp.ratio.setValueAtTime(6, t0);
+    comp.attack.setValueAtTime(0.003, t0);
+    comp.release.setValueAtTime(0.25, t0);
+
+    master.connect(comp);
+    comp.connect(ctx.destination);
+
+    const pulse = (start, freq, dur) => {
       const osc = ctx.createOscillator();
-      osc.type = "sine";
-      osc.frequency.setValueAtTime(p.f, t0);
+      osc.type = "square";
+      osc.frequency.setValueAtTime(freq, start);
+
+      const filter = ctx.createBiquadFilter();
+      filter.type = "bandpass";
+      filter.frequency.setValueAtTime(freq, start);
+      filter.Q.setValueAtTime(8, start);
 
       const g = ctx.createGain();
-      g.gain.setValueAtTime(0.0001, t0);
-      g.gain.linearRampToValueAtTime(p.a, t0 + 0.01);
-      g.gain.exponentialRampToValueAtTime(0.0001, t0 + p.d);
-      osc.connect(g);
-      g.connect(out);
+      g.gain.setValueAtTime(0.0001, start);
+      g.gain.linearRampToValueAtTime(0.26, start + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, start + dur);
 
-      osc.start(t0);
-      osc.stop(t0 + p.d + 0.05);
+      osc.connect(filter);
+      filter.connect(g);
+      g.connect(master);
+
+      osc.start(start);
+      osc.stop(start + dur + 0.02);
+
       osc.onended = () => {
         try {
           osc.disconnect();
+          filter.disconnect();
           g.disconnect();
         } catch {
           // ignore
         }
       };
-    }
+    };
 
-    // Gentle overall envelope to avoid clicks.
-    out.gain.setValueAtTime(0.0001, t0);
-    out.gain.linearRampToValueAtTime(0.9, t0 + 0.01);
-    out.gain.exponentialRampToValueAtTime(0.0001, t0 + 1.0);
+    // Attention pattern (about ~0.9s): alternating high/low "beeps".
+    pulse(t0, 1046, 0.16); // C6
+    pulse(t0 + 0.22, 784, 0.16); // G5
+    pulse(t0 + 0.44, 1046, 0.16);
+    pulse(t0 + 0.66, 784, 0.16);
+
+    master.gain.setValueAtTime(0.0001, t0);
+    master.gain.linearRampToValueAtTime(1.0, t0 + 0.02);
+    master.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.95);
   }
 
   function playAcceptedSound() {
@@ -152,7 +169,7 @@ export function createAudio({ state } = {}) {
     state.audio.lastBeepAt = now;
 
     try {
-      if (typeof navigator.vibrate === "function") navigator.vibrate([120, 80, 120]);
+      if (typeof navigator.vibrate === "function") navigator.vibrate([180, 80, 180, 80, 180]);
     } catch {
       // ignore
     }
@@ -167,12 +184,12 @@ export function createAudio({ state } = {}) {
       const p = sample.play();
       if (p && typeof p.catch === "function") p.catch(() => {});
       setTimeout(() => {
-        if (sample.paused) playBellWebAudio();
+        if (sample.paused) playAttentionWebAudio();
       }, 160);
       return;
     }
 
-    playBellWebAudio();
+    playAttentionWebAudio();
   }
 
   function hasPendingDriverRequests() {
@@ -197,7 +214,7 @@ export function createAudio({ state } = {}) {
         return;
       }
       playNotificationSound();
-    }, 1000);
+    }, 2500);
   }
 
   function updateRequestAlarm() {

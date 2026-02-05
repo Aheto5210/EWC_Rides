@@ -148,8 +148,6 @@ export function createSheet(state, els) {
   function promptDriverRegister() {
     return new Promise((resolve) => {
       const body = document.createElement("div");
-      const savedName = (localStorage.getItem(STORAGE_KEYS.driverAuthName) ?? "").trim();
-      const savedPhone = (localStorage.getItem(STORAGE_KEYS.driverAuthPhone) ?? "").trim();
 
       body.innerHTML = `
         <div class="muted">Register once. Your 4-digit code is your phone’s last 4 digits.</div>
@@ -167,8 +165,6 @@ export function createSheet(state, els) {
 
       const nameInput = body.querySelector("#sheetRegName");
       const phoneInput = body.querySelector("#sheetRegPhone");
-      if (nameInput) nameInput.value = savedName;
-      if (phoneInput) phoneInput.value = formatPhoneDigits(savedPhone);
 
       state.sheet.onClose = () => resolve(null);
       state.sheet.onConfirm = async () => {

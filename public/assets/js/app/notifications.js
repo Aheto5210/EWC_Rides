@@ -1,54 +1,84 @@
-export function createNotifications({ state } = {}) {
+export function createNotifications({ state, els } = {}) {
+  const shownByTag = new Map(); // tag -> element
+
+  // Keep this for API compatibility; we no longer prompt for OS notification permission.
   async function ensureNotificationPermission() {
-    if (state.role !== "driver") return false;
-    if (typeof Notification === "undefined") return false;
-    if (Notification.permission === "granted") return true;
-    if (Notification.permission === "denied") return false;
-    try {
-      const result = await Notification.requestPermission();
-      return result === "granted";
-    } catch {
-      return false;
+    return false;
+  }
+
+  function removeToast(el) {
+    if (!el) return;
+    el.classList.add("toast--leaving");
+    const tag = el.getAttribute("data-tag") || "";
+    if (tag) shownByTag.delete(tag);
+    setTimeout(() => {
+      try {
+        el.remove();
+      } catch {
+        // ignore
+      }
+    }, 160);
+  }
+
+  function showToast({ title, body, tone = "info", tag = "", durationMs = 4500 } = {}) {
+    if (!els?.toasts) return;
+    const safeTitle = String(title ?? "").trim() || "Update";
+    const safeBody = String(body ?? "").trim();
+    const safeTone = ["success", "warning", "danger", "info"].includes(tone) ? tone : "info";
+    const safeTag = tag ? String(tag) : "";
+
+    if (safeTag && shownByTag.has(safeTag)) {
+      const existing = shownByTag.get(safeTag);
+      if (existing) removeToast(existing);
+    }
+
+    const el = document.createElement("div");
+    el.className = `toast toast--${safeTone}`;
+    if (safeTag) el.setAttribute("data-tag", safeTag);
+    el.innerHTML = `
+      <div class="toast__dot" aria-hidden="true"></div>
+      <div class="toast__content">
+        <div class="toast__title">${escapeHtml(safeTitle)}</div>
+        ${safeBody ? `<div class="toast__body">${escapeHtml(safeBody)}</div>` : ""}
+      </div>
+      <button class="toast__close" type="button" aria-label="Dismiss">✕</button>
+    `;
+
+    const btn = el.querySelector(".toast__close");
+    btn?.addEventListener("click", () => removeToast(el));
+    el.addEventListener("click", (e) => {
+      const target = e.target;
+      if (target && target.closest && target.closest(".toast__close")) return;
+      removeToast(el);
+    });
+
+    els.toasts.appendChild(el);
+    if (safeTag) shownByTag.set(safeTag, el);
+
+    if (durationMs > 0) {
+      setTimeout(() => removeToast(el), durationMs);
     }
   }
 
   async function showDriverNotification({ title, body, tag }) {
     if (state.role !== "driver") return;
-    if (typeof Notification === "undefined") return;
-    if (Notification.permission !== "granted") return;
-
-    const options = {
-      body: String(body ?? ""),
-      tag: tag ? String(tag) : undefined,
-      renotify: true,
-      icon: "/assets/icon.svg",
-      badge: "/assets/icon.svg",
-    };
-
-    try {
-      const reg = await navigator.serviceWorker?.ready;
-      if (reg?.showNotification) {
-        await reg.showNotification(String(title ?? "EWC Rides"), options);
-        return;
-      }
-    } catch {
-      // ignore
-    }
-
-    try {
-      const n = new Notification(String(title ?? "EWC Rides"), options);
-      n.onclick = () => {
-        try {
-          window.focus();
-        } catch {
-          // ignore
-        }
-      };
-    } catch {
-      // ignore
-    }
+    showToast({
+      title: title || "New request",
+      body,
+      tag,
+      tone: "warning",
+      durationMs: 7000,
+    });
   }
 
-  return { ensureNotificationPermission, showDriverNotification };
+  return { ensureNotificationPermission, showDriverNotification, showToast };
 }
 
+function escapeHtml(str) {
+  return String(str)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}

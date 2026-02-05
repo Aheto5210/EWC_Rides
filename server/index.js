@@ -15,7 +15,7 @@ const PUBLIC_DIR = path.join(__dirname, "..", "public");
 
 const ROOM_CODE = (process.env.ROOM_CODE ?? "").trim() || null;
 const DRIVER_DB_FILE = path.join(__dirname, "data", "ewc.sqlite");
-const DRIVER_DB_LEGACY_JSON_FILE = path.join(__dirname, "data", "drivers.json");
+const MAX_JSON_BODY_BYTES = clampNumber(Number(process.env.MAX_JSON_BODY_BYTES ?? 32_768), 1024, 1_048_576);
 const DRIVER_SESSION_TTL_MS =
   clampNumber(Number(process.env.DRIVER_SESSION_TTL_DAYS ?? 14), 1, 180) *
   24 *
@@ -58,6 +58,42 @@ const DRIVER_STALE_MS = clampNumber(
   10,
   300,
 ) * 1_000;
+// Consider a driver "active" for phone-reservation purposes only if we've seen a recent heartbeat.
+// (This allows registered drivers to request rides with their own number once they're no longer active.)
+const DRIVER_PHONE_ACTIVE_MS = Math.min(DRIVER_STALE_MS, 25_000);
+const RIDER_SNAPSHOT_INTERVAL_MS = clampNumber(
+  Number(process.env.RIDER_SNAPSHOT_SECONDS ?? 10),
+  3,
+  60,
+) * 1_000;
+const DRIVER_BROADCAST_MIN_MS = clampNumber(
+  Number(process.env.DRIVER_BROADCAST_MIN_MS ?? 5000),
+  500,
+  60_000,
+);
+const DRIVER_BROADCAST_MIN_MOVE_M = clampNumber(
+  Number(process.env.DRIVER_BROADCAST_MIN_MOVE_M ?? 30),
+  0,
+  500,
+);
+const ASSIGNED_TTL_MS = clampNumber(
+  Number(process.env.ASSIGNED_TTL_MINUTES ?? 180),
+  15,
+  24 * 60,
+) * 60_000;
+
+// Static response caching (server-side). Nginx can handle this too, but keeping a small in-memory
+// cache helps on smaller VPS disks and reduces filesystem churn.
+const STATIC_CACHE_MAX_BYTES = clampNumber(
+  Number(process.env.STATIC_CACHE_MAX_BYTES ?? 8 * 1024 * 1024),
+  0,
+  64 * 1024 * 1024,
+);
+const STATIC_CACHE_MAX_FILE_BYTES = clampNumber(
+  Number(process.env.STATIC_CACHE_MAX_FILE_BYTES ?? 512 * 1024),
+  0,
+  5 * 1024 * 1024,
+);
 
 function clampNumber(value, min, max) {
   if (!Number.isFinite(value)) return min;
@@ -70,6 +106,8 @@ function json(res, statusCode, body) {
     "content-type": "application/json; charset=utf-8",
     "content-length": Buffer.byteLength(payload),
     "cache-control": "no-store",
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer",
   });
   res.end(payload);
 }
@@ -105,12 +143,23 @@ function setCookie(res, name, value, opts = {}) {
 
 async function readBody(req) {
   const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
+  let total = 0;
+  for await (const chunk of req) {
+    total += chunk.length || 0;
+    if (total > MAX_JSON_BODY_BYTES) throw new Error("BODY_TOO_LARGE");
+    chunks.push(chunk);
+  }
   return Buffer.concat(chunks).toString("utf8");
 }
 
 async function readJson(req) {
-  const raw = await readBody(req);
+  let raw = "";
+  try {
+    raw = await readBody(req);
+  } catch (e) {
+    if (e && e.message === "BODY_TOO_LARGE") return { __tooLarge: true };
+    throw e;
+  }
   if (!raw) return null;
   try {
     return JSON.parse(raw);
@@ -215,6 +264,14 @@ await ensureDir(path.dirname(DRIVER_DB_FILE));
 const db = new DatabaseSync(DRIVER_DB_FILE);
 db.exec("PRAGMA journal_mode=WAL;");
 db.exec("PRAGMA synchronous=NORMAL;");
+db.exec("PRAGMA busy_timeout=5000;");
+db.exec("PRAGMA temp_store=MEMORY;");
+// A modest cache helps reduce IO on VPS disks.
+try {
+  db.exec("PRAGMA cache_size=-4000;"); // ~4MB
+} catch {
+  // ignore
+}
 db.exec(`
   CREATE TABLE IF NOT EXISTS drivers (
     phone TEXT PRIMARY KEY,
@@ -224,6 +281,63 @@ db.exec(`
     updated_at INTEGER NOT NULL
   );
 `);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS online_drivers (
+    room TEXT NOT NULL,
+    driver_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    phone TEXT,
+    lat REAL,
+    lng REAL,
+    accuracy_m REAL,
+    heading REAL,
+    speed_mps REAL,
+    updated_at INTEGER NOT NULL,
+    last_broadcast_at INTEGER NOT NULL,
+    PRIMARY KEY (room, driver_id)
+  );
+`);
+
+// Backfill schema for older databases.
+try {
+  const cols = db.prepare("PRAGMA table_info(online_drivers)").all();
+  const hasPhone = Array.isArray(cols) && cols.some((c) => String(c?.name) === "phone");
+  if (!hasPhone) db.exec("ALTER TABLE online_drivers ADD COLUMN phone TEXT;");
+} catch {
+  // ignore
+}
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS ride_requests (
+    id TEXT PRIMARY KEY,
+    room TEXT NOT NULL,
+    rider_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    rider_phone TEXT,
+    note TEXT,
+    status TEXT NOT NULL,
+    lat REAL NOT NULL,
+    lng REAL NOT NULL,
+    created_at INTEGER NOT NULL,
+    target_driver_id TEXT,
+    target_driver_name TEXT,
+    assigned_driver_id TEXT,
+    assigned_driver_name TEXT,
+    assigned_driver_phone TEXT
+  );
+`);
+
+db.exec("CREATE INDEX IF NOT EXISTS idx_online_drivers_room_updated ON online_drivers(room, updated_at);");
+db.exec(
+  "CREATE INDEX IF NOT EXISTS idx_ride_requests_room_status_created ON ride_requests(room, status, created_at);",
+);
+db.exec(
+  "CREATE INDEX IF NOT EXISTS idx_ride_requests_room_rider_status ON ride_requests(room, rider_id, status);",
+);
+db.exec(
+  "CREATE INDEX IF NOT EXISTS idx_ride_requests_room_target_status ON ride_requests(room, target_driver_id, status);",
+);
 
 function dbGetDriverByPhone(phone) {
   return (
@@ -256,37 +370,160 @@ function dbCountDrivers() {
   return Number(row?.n ?? 0);
 }
 
-async function migrateLegacyDriversJson() {
-  if (dbCountDrivers() > 0) return;
-  try {
-    const raw = await fs.readFile(DRIVER_DB_LEGACY_JSON_FILE, "utf8");
-    const parsed = JSON.parse(raw);
-    const drivers =
-      parsed && typeof parsed === "object" && parsed.drivers && typeof parsed.drivers === "object"
-        ? parsed.drivers
-        : null;
-    if (!drivers) return;
-
-    for (const [phoneRaw, record] of Object.entries(drivers)) {
-      const phone = sanitizePhone(phoneRaw);
-      if (!isValidPhone(phone)) continue;
-      const name = sanitizeName(record?.name);
-      const code = last4(phone);
-      const now = nowMs();
-      if (dbGetDriverByPhone(phone)) continue;
-      if (dbGetDriverByCode(code)) continue;
-      try {
-        dbInsertDriver({ phone, code, name, now });
-      } catch {
-        // ignore duplicates/bad rows
-      }
-    }
-  } catch {
-    // ignore
-  }
+function dbUpsertOnlineDriver({
+  room,
+  driverId,
+  name,
+  phone = "",
+  lat = null,
+  lng = null,
+  accuracyM = null,
+  heading = null,
+  speedMps = null,
+  updatedAt,
+  lastBroadcastAt,
+}) {
+  db.prepare(
+    `
+    INSERT INTO online_drivers
+      (room, driver_id, name, phone, lat, lng, accuracy_m, heading, speed_mps, updated_at, last_broadcast_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(room, driver_id) DO UPDATE SET
+      name = excluded.name,
+      phone = excluded.phone,
+      lat = excluded.lat,
+      lng = excluded.lng,
+      accuracy_m = excluded.accuracy_m,
+      heading = excluded.heading,
+      speed_mps = excluded.speed_mps,
+      updated_at = excluded.updated_at,
+      last_broadcast_at = excluded.last_broadcast_at
+  `,
+  ).run(
+    room,
+    driverId,
+    name,
+    phone,
+    lat,
+    lng,
+    accuracyM,
+    heading,
+    speedMps,
+    updatedAt,
+    lastBroadcastAt,
+  );
 }
 
-await migrateLegacyDriversJson();
+function dbDeleteOnlineDriver(room, driverId) {
+  db.prepare("DELETE FROM online_drivers WHERE room = ? AND driver_id = ?").run(room, driverId);
+}
+
+function dbUpsertRideRequest(room, req) {
+  db.prepare(
+    `
+    INSERT INTO ride_requests
+      (id, room, rider_id, name, rider_phone, note, status, lat, lng, created_at,
+       target_driver_id, target_driver_name, assigned_driver_id, assigned_driver_name, assigned_driver_phone)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      status = excluded.status,
+      target_driver_id = excluded.target_driver_id,
+      target_driver_name = excluded.target_driver_name,
+      assigned_driver_id = excluded.assigned_driver_id,
+      assigned_driver_name = excluded.assigned_driver_name,
+      assigned_driver_phone = excluded.assigned_driver_phone
+  `,
+  ).run(
+    req.id,
+    room,
+    req.riderId,
+    req.name,
+    req.riderPhone ?? "",
+    req.note ?? "",
+    req.status,
+    req.lat,
+    req.lng,
+    req.createdAt,
+    req.targetDriverId ?? null,
+    req.targetDriverName ?? null,
+    req.assignedDriverId ?? null,
+    req.assignedDriverName ?? null,
+    req.assignedDriverPhone ?? "",
+  );
+}
+
+function dbDeleteRideRequest(id) {
+  db.prepare("DELETE FROM ride_requests WHERE id = ?").run(id);
+}
+
+function hydratePersistedState() {
+  const now = nowMs();
+  const drivers = db
+    .prepare(
+      "SELECT room, driver_id AS driverId, name, phone, lat, lng, accuracy_m AS accuracyM, heading, speed_mps AS speedMps, updated_at AS updatedAt, last_broadcast_at AS lastBroadcastAt FROM online_drivers",
+    )
+    .all();
+  for (const d of drivers) {
+    if (!d?.room || !d?.driverId) continue;
+    if (Number(d.updatedAt || 0) < now - DRIVER_STALE_MS) continue;
+    const { state: roomState } = getRoomState(d.room);
+    roomState.drivers.set(d.driverId, {
+      id: d.driverId,
+      name: sanitizeName(d.name),
+      phone: sanitizePhone(d.phone),
+      available: true,
+      last: Number.isFinite(Number(d.lat)) && Number.isFinite(Number(d.lng))
+        ? {
+            lat: Number(d.lat),
+            lng: Number(d.lng),
+            accuracyM: Number.isFinite(Number(d.accuracyM)) ? Number(d.accuracyM) : null,
+            heading: Number.isFinite(Number(d.heading)) ? Number(d.heading) : null,
+            speedMps: Number.isFinite(Number(d.speedMps)) ? Number(d.speedMps) : null,
+            updatedAt: Number(d.updatedAt),
+          }
+        : null,
+      updatedAt: Number(d.updatedAt || 0),
+      lastBroadcastAt: Number(d.lastBroadcastAt || 0),
+    });
+  }
+
+  const reqs = db
+    .prepare(
+      "SELECT id, room, rider_id AS riderId, name, rider_phone AS riderPhone, note, status, lat, lng, created_at AS createdAt, target_driver_id AS targetDriverId, target_driver_name AS targetDriverName, assigned_driver_id AS assignedDriverId, assigned_driver_name AS assignedDriverName, assigned_driver_phone AS assignedDriverPhone FROM ride_requests",
+    )
+    .all();
+  for (const r of reqs) {
+    if (!r?.room || !r?.id) continue;
+    const createdAt = Number(r.createdAt || 0);
+    if (r.status === "pending" && createdAt < now - REQUEST_TTL_MS) {
+      dbDeleteRideRequest(r.id);
+      continue;
+    }
+    if (r.status === "assigned" && createdAt < now - ASSIGNED_TTL_MS) {
+      dbDeleteRideRequest(r.id);
+      continue;
+    }
+    const { state: roomState } = getRoomState(r.room);
+    const req = {
+      id: String(r.id),
+      riderId: String(r.riderId),
+      name: sanitizeName(r.name),
+      riderPhone: sanitizePhone(r.riderPhone),
+      note: String(r.note ?? ""),
+      status: String(r.status),
+      lat: Number(r.lat),
+      lng: Number(r.lng),
+      createdAt,
+      targetDriverId: r.targetDriverId ? String(r.targetDriverId) : null,
+      targetDriverName: r.targetDriverName ? String(r.targetDriverName) : null,
+      assignedDriverId: r.assignedDriverId ? String(r.assignedDriverId) : null,
+      assignedDriverName: r.assignedDriverName ? String(r.assignedDriverName) : null,
+      assignedDriverPhone: sanitizePhone(r.assignedDriverPhone),
+    };
+    roomState.requests.set(req.id, req);
+    if (req.status === "assigned") indexAssigned(roomState, req);
+  }
+}
 
 const driverSessions = new Map(); // token -> { phone, name, createdAt, expiresAt }
 
@@ -345,10 +582,35 @@ function isValidLatLng(lat, lng) {
 
 function makeRoomState() {
   return {
+    roomId: "ewc",
     drivers: new Map(), // driverId -> driver
     requests: new Map(), // requestId -> request
     subscribers: new Set(), // sse clients
+    assignedRidersByDriver: new Map(), // driverId -> Set<riderId>
+    snapshotCache: { at: 0, drivers: [] },
   };
+}
+
+function indexAssigned(roomState, request) {
+  const driverId = request?.assignedDriverId;
+  const riderId = request?.riderId;
+  if (!driverId || !riderId) return;
+  let set = roomState.assignedRidersByDriver.get(driverId);
+  if (!set) {
+    set = new Set();
+    roomState.assignedRidersByDriver.set(driverId, set);
+  }
+  set.add(riderId);
+}
+
+function unindexAssigned(roomState, request) {
+  const driverId = request?.assignedDriverId;
+  const riderId = request?.riderId;
+  if (!driverId || !riderId) return;
+  const set = roomState.assignedRidersByDriver.get(driverId);
+  if (!set) return;
+  set.delete(riderId);
+  if (set.size === 0) roomState.assignedRidersByDriver.delete(driverId);
 }
 
 const rooms = new Map(); // roomId -> roomState
@@ -358,10 +620,13 @@ function getRoomState(roomId) {
   let state = rooms.get(id);
   if (!state) {
     state = makeRoomState();
+    state.roomId = id;
     rooms.set(id, state);
   }
   return { id, state };
 }
+
+hydratePersistedState();
 
 function sseWrite(res, event, data) {
   res.write(`event: ${event}\n`);
@@ -374,16 +639,21 @@ function sseKeepAlive(res) {
 }
 
 function sendSnapshot(subscriber, roomId, roomState) {
-  const drivers = [];
-  for (const driver of roomState.drivers.values()) {
-    if (!driver.available) continue;
-    if (!driver.last) continue;
-    drivers.push(publicDriver(driver));
+  const now = nowMs();
+  // Cache driver payload briefly so hundreds of rider snapshots don't re-serialize the same list.
+  if (!roomState.snapshotCache || now - Number(roomState.snapshotCache.at || 0) > 750) {
+    const drivers = [];
+    for (const driver of roomState.drivers.values()) {
+      if (!driver.available) continue;
+      if (!driver.last) continue;
+      drivers.push(publicDriver(driver));
+    }
+    roomState.snapshotCache = { at: now, drivers };
   }
 
   const payload = {
     room: roomId,
-    now: nowMs(),
+    now,
     config: {
       maxPickupDistanceKm: MAX_PICKUP_DISTANCE_KM,
       maxPickupMinutes: MAX_PICKUP_MINUTES_EFFECTIVE,
@@ -393,7 +663,7 @@ function sendSnapshot(subscriber, roomId, roomState) {
       driverStaleSeconds: Math.round(DRIVER_STALE_MS / 1_000),
       roomCodeRequired: Boolean(ROOM_CODE),
     },
-    drivers,
+    drivers: roomState.snapshotCache.drivers,
     requests: [],
   };
 
@@ -474,6 +744,50 @@ function countActiveRequestsForDriver(roomState, driverId) {
   return count;
 }
 
+function isRiderPhoneInUse(roomState, riderPhone, exceptRiderId = "") {
+  const phone = sanitizePhone(riderPhone);
+  if (!phone) return false;
+  for (const req of roomState.requests.values()) {
+    if (!req) continue;
+    if (req.status !== "pending" && req.status !== "assigned") continue;
+    if (exceptRiderId && req.riderId === exceptRiderId) continue;
+    if (sanitizePhone(req.riderPhone) === phone) return true;
+  }
+  return false;
+}
+
+function isRegisteredDriverOnlineInRoom(roomState, phoneDigits) {
+  const phone = sanitizePhone(phoneDigits);
+  if (!phone) return false;
+  const cutoff = nowMs() - DRIVER_PHONE_ACTIVE_MS;
+  for (const d of roomState.drivers.values()) {
+    if (!d) continue;
+    if (!d.available) continue;
+    if (!sanitizePhone(d.phone)) continue;
+    if (sanitizePhone(d.phone) !== phone) continue;
+    const updatedAt = Number(d.last?.updatedAt ?? d.updatedAt ?? 0);
+    if (!updatedAt || updatedAt < cutoff) continue;
+    return true;
+  }
+  return false;
+}
+
+function pickBestDriver(roomState, riderLat, riderLng) {
+  let best = null;
+  for (const d of roomState.drivers.values()) {
+    if (!d.available) continue;
+    if (!d.last) continue;
+    const activeCount = countActiveRequestsForDriver(roomState, d.id);
+    if (activeCount >= MAX_ACTIVE_REQUESTS_PER_DRIVER) continue;
+    const distKm = haversineKm(d.last.lat, d.last.lng, riderLat, riderLng);
+    if (distKm > MAX_PICKUP_DISTANCE_KM) continue;
+    const eta = (distKm / ASSUMED_SPEED_KMH) * 60;
+    if (!Number.isFinite(eta)) continue;
+    if (!best || eta < best.eta) best = { driver: d, eta };
+  }
+  return best;
+}
+
 function eachSubscriber(roomState, fn) {
   for (const sub of roomState.subscribers) {
     try {
@@ -487,7 +801,14 @@ function eachSubscriber(roomState, fn) {
 function sendDriverUpdate(roomState, driver) {
   const payload = publicDriver(driver);
   eachSubscriber(roomState, (sub) => {
-    if (sub.role !== "driver" && sub.role !== "rider") return;
+    if (sub.role === "driver") {
+      sseWrite(sub.res, "driver:update", payload);
+      return;
+    }
+    if (sub.role !== "rider") return;
+    const riderIds = roomState.assignedRidersByDriver.get(driver.id);
+    if (!riderIds) return;
+    if (!riderIds.has(sub.deviceId)) return;
     sseWrite(sub.res, "driver:update", payload);
   });
 }
@@ -537,27 +858,63 @@ function sendRequestRemove(roomState, request, reason = null) {
 function cleanupStale() {
   const cutoffDriver = nowMs() - DRIVER_STALE_MS;
   const cutoffRequest = nowMs() - REQUEST_TTL_MS;
+  const cutoffAssigned = nowMs() - ASSIGNED_TTL_MS;
 
-  for (const roomState of rooms.values()) {
+  for (const [roomId, roomState] of rooms.entries()) {
     for (const [driverId, driver] of roomState.drivers.entries()) {
       if (!driver.available) continue;
-      const updatedAt = driver.last?.updatedAt ?? 0;
+      const updatedAt = Number(driver.last?.updatedAt ?? driver.updatedAt ?? 0);
       if (updatedAt >= cutoffDriver) continue;
       driver.available = false;
       roomState.drivers.delete(driverId);
+      try {
+        dbDeleteOnlineDriver(roomId, driverId);
+      } catch {
+        // ignore
+      }
       sendDriverRemove(roomState, driverId);
     }
 
     for (const [requestId, req] of roomState.requests.entries()) {
-      if (req.status !== "pending") continue;
-      if (req.createdAt >= cutoffRequest) continue;
-      roomState.requests.delete(requestId);
-      sendRequestRemove(roomState, req, "expired");
+      if (req.status === "pending") {
+        if (req.createdAt >= cutoffRequest) continue;
+        roomState.requests.delete(requestId);
+        try {
+          dbDeleteRideRequest(requestId);
+        } catch {
+          // ignore
+        }
+        sendRequestRemove(roomState, req, "expired");
+        continue;
+      }
+      if (req.status === "assigned") {
+        if (req.createdAt >= cutoffAssigned) continue;
+        unindexAssigned(roomState, req);
+        roomState.requests.delete(requestId);
+        try {
+          dbDeleteRideRequest(requestId);
+        } catch {
+          // ignore
+        }
+        sendRequestRemove(roomState, req, "stale");
+      }
     }
+  }
+
+  // DB cleanup (for rooms not currently in memory).
+  try {
+    db.prepare("DELETE FROM online_drivers WHERE updated_at < ?").run(cutoffDriver);
+    db.prepare("DELETE FROM ride_requests WHERE status = 'pending' AND created_at < ?").run(cutoffRequest);
+    db.prepare("DELETE FROM ride_requests WHERE status = 'assigned' AND created_at < ?").run(cutoffAssigned);
+  } catch {
+    // ignore
   }
 }
 
 setInterval(cleanupStale, 5_000).unref();
+
+const staticCache = new Map(); // filePath -> { etag, data, contentType, cacheControl }
+let staticCacheBytes = 0;
 
 async function serveStatic(req, res) {
   const reqUrl = req.url ?? "/";
@@ -573,7 +930,7 @@ async function serveStatic(req, res) {
   }
 
   try {
-    const data = await fs.readFile(filePath);
+    const stat = await fs.stat(filePath);
     const ext = path.extname(filePath).toLowerCase();
     const contentType = {
       ".html": "text/html; charset=utf-8",
@@ -586,12 +943,65 @@ async function serveStatic(req, res) {
       ".png": "image/png",
       ".ico": "image/x-icon",
     }[ext];
+    const etag = `W/"${stat.size}-${Math.floor(stat.mtimeMs)}"`;
 
+    const inm = (req.headers["if-none-match"] ?? "").toString();
+    if (inm && inm === etag) {
+      res.writeHead(304, {
+        etag,
+        "cache-control": ext === ".html" ? "no-store" : "public, max-age=3600",
+      });
+      res.end();
+      return;
+    }
+
+    const cacheControl =
+      pathname === "/sw.js"
+        ? "no-cache"
+        : ext === ".html"
+          ? "no-store"
+          : "public, max-age=3600";
+
+    const cached = STATIC_CACHE_MAX_BYTES > 0 ? staticCache.get(filePath) : null;
+    if (cached && cached.etag === etag) {
+      res.writeHead(200, {
+        "content-type": cached.contentType ?? "application/octet-stream",
+        "content-length": cached.data.length,
+        etag,
+        "cache-control": cached.cacheControl,
+        "x-content-type-options": "nosniff",
+        "referrer-policy": "no-referrer",
+      });
+      res.end(cached.data);
+      return;
+    }
+
+    const data = await fs.readFile(filePath);
     res.writeHead(200, {
       "content-type": contentType ?? "application/octet-stream",
-      "cache-control": ext === ".html" ? "no-store" : "public, max-age=60",
+      "content-length": data.length,
+      etag,
+      "cache-control": cacheControl,
+      "x-content-type-options": "nosniff",
+      "referrer-policy": "no-referrer",
     });
     res.end(data);
+
+    if (
+      STATIC_CACHE_MAX_BYTES > 0 &&
+      data.length > 0 &&
+      data.length <= STATIC_CACHE_MAX_FILE_BYTES &&
+      cacheControl !== "no-store"
+    ) {
+      const prev = staticCache.get(filePath);
+      if (!prev) staticCacheBytes += data.length;
+      staticCache.set(filePath, { etag, data, contentType, cacheControl });
+      while (staticCacheBytes > STATIC_CACHE_MAX_BYTES && staticCache.size) {
+        const [firstKey, firstVal] = staticCache.entries().next().value;
+        staticCache.delete(firstKey);
+        staticCacheBytes -= firstVal?.data?.length ?? 0;
+      }
+    }
   } catch {
     res.writeHead(404);
     res.end("Not found");
@@ -601,6 +1011,11 @@ async function serveStatic(req, res) {
 const requestHandler = async (req, res) => {
   const method = req.method ?? "GET";
   const url = req.url ?? "/";
+
+  if (url.startsWith("/api/health") && method === "GET") {
+    json(res, 200, { ok: true, now: nowMs() });
+    return;
+  }
 
   if (url.startsWith("/api/config") && method === "GET") {
     json(res, 200, {
@@ -665,9 +1080,15 @@ const requestHandler = async (req, res) => {
 
     const keepAlive = setInterval(() => sseKeepAlive(res), 15_000);
     keepAlive.unref();
+    const riderSnapshot =
+      role === "rider"
+        ? setInterval(() => sendSnapshot(subscriber, roomId, roomState), RIDER_SNAPSHOT_INTERVAL_MS)
+        : null;
+    riderSnapshot?.unref?.();
 
     req.on("close", () => {
       clearInterval(keepAlive);
+      if (riderSnapshot) clearInterval(riderSnapshot);
       roomState.subscribers.delete(subscriber);
     });
     return;
@@ -676,6 +1097,7 @@ const requestHandler = async (req, res) => {
   if (url.startsWith("/api/auth/driver/register") && method === "POST") {
     const body = await readJson(req);
     if (!body) return json(res, 400, { error: "INVALID_JSON" });
+    if (body.__tooLarge) return json(res, 413, { error: "BODY_TOO_LARGE" });
 
     const name = sanitizeName(body.name);
     const phone = sanitizePhone(body.phone);
@@ -721,6 +1143,7 @@ const requestHandler = async (req, res) => {
   if (url.startsWith("/api/auth/driver/login") && method === "POST") {
     const body = await readJson(req);
     if (!body) return json(res, 400, { error: "INVALID_JSON" });
+    if (body.__tooLarge) return json(res, 413, { error: "BODY_TOO_LARGE" });
 
     const code = digitsOnly(body.code).slice(0, 4);
     if (!code || code.length !== 4) return json(res, 400, { error: "INVALID_CODE" });
@@ -764,6 +1187,7 @@ const requestHandler = async (req, res) => {
   if (url.startsWith("/api/driver/start") && method === "POST") {
     const body = await readJson(req);
     if (!body) return json(res, 400, { error: "INVALID_JSON" });
+    if (body.__tooLarge) return json(res, 413, { error: "BODY_TOO_LARGE" });
     if (!requireRoomCodeOr401(body.code, res)) return;
     const auth = requireDriverSession(req, res, body);
     if (!auth) return;
@@ -775,15 +1199,31 @@ const requestHandler = async (req, res) => {
 
     const { state: roomState } = getRoomState(room);
     const existing = roomState.drivers.get(driverId);
+    const now = nowMs();
     const driver = existing ?? {
       id: driverId,
       name,
+      phone: sanitizePhone(auth.session.phone),
       available: true,
       last: null,
+      updatedAt: now,
+      lastBroadcastAt: 0,
     };
     driver.name = name;
+    driver.phone = sanitizePhone(auth.session.phone);
     driver.available = true;
+    driver.updatedAt = now;
+    driver.lastBroadcastAt = 0;
     roomState.drivers.set(driverId, driver);
+
+    dbUpsertOnlineDriver({
+      room,
+      driverId,
+      name: driver.name,
+      phone: driver.phone,
+      updatedAt: now,
+      lastBroadcastAt: Number(driver.lastBroadcastAt || 0),
+    });
 
     sendDriverUpdate(roomState, driver);
     json(res, 200, { ok: true });
@@ -793,6 +1233,7 @@ const requestHandler = async (req, res) => {
   if (url.startsWith("/api/driver/update") && method === "POST") {
     const body = await readJson(req);
     if (!body) return json(res, 400, { error: "INVALID_JSON" });
+    if (body.__tooLarge) return json(res, 413, { error: "BODY_TOO_LARGE" });
     if (!requireRoomCodeOr401(body.code, res)) return;
     const auth = requireDriverSession(req, res, body);
     if (!auth) return;
@@ -813,12 +1254,20 @@ const requestHandler = async (req, res) => {
     const driver = existing ?? {
       id: driverId,
       name: sanitizeName(auth.session.name),
+      phone: sanitizePhone(auth.session.phone),
       available: true,
       last: null,
+      updatedAt: nowMs(),
+      lastBroadcastAt: 0,
     };
 
+    const prev = driver.last;
+    const prevLat = prev?.lat;
+    const prevLng = prev?.lng;
     driver.available = true;
     driver.name = sanitizeName(auth.session.name ?? driver.name);
+    driver.phone = sanitizePhone(auth.session.phone ?? driver.phone);
+    driver.updatedAt = nowMs();
     driver.last = {
       lat,
       lng,
@@ -829,7 +1278,36 @@ const requestHandler = async (req, res) => {
     };
     roomState.drivers.set(driverId, driver);
 
-    sendDriverUpdate(roomState, driver);
+    const now = driver.last.updatedAt;
+    const lastBroadcastAt = Number(driver.lastBroadcastAt || 0);
+    const since = now - lastBroadcastAt;
+    let movedM = Infinity;
+    if (isValidLatLng(Number(prevLat), Number(prevLng))) {
+      movedM = haversineKm(prevLat, prevLng, lat, lng) * 1000;
+    }
+    const shouldBroadcast =
+      lastBroadcastAt === 0 ||
+      since >= DRIVER_BROADCAST_MIN_MS ||
+      (Number.isFinite(movedM) && movedM >= DRIVER_BROADCAST_MIN_MOVE_M);
+
+    if (shouldBroadcast) {
+      driver.lastBroadcastAt = now;
+      sendDriverUpdate(roomState, driver);
+    }
+
+    dbUpsertOnlineDriver({
+      room,
+      driverId,
+      name: driver.name,
+      phone: driver.phone,
+      lat,
+      lng,
+      accuracyM,
+      heading,
+      speedMps,
+      updatedAt: now,
+      lastBroadcastAt: Number(driver.lastBroadcastAt || 0),
+    });
     json(res, 200, { ok: true });
     return;
   }
@@ -837,6 +1315,7 @@ const requestHandler = async (req, res) => {
   if (url.startsWith("/api/driver/stop") && method === "POST") {
     const body = await readJson(req);
     if (!body) return json(res, 400, { error: "INVALID_JSON" });
+    if (body.__tooLarge) return json(res, 413, { error: "BODY_TOO_LARGE" });
     if (!requireRoomCodeOr401(body.code, res)) return;
     const auth = requireDriverSession(req, res, body);
     if (!auth) return;
@@ -847,6 +1326,7 @@ const requestHandler = async (req, res) => {
 
     const { state: roomState } = getRoomState(room);
     roomState.drivers.delete(driverId);
+    dbDeleteOnlineDriver(room, driverId);
     sendDriverRemove(roomState, driverId);
     json(res, 200, { ok: true });
     return;
@@ -855,6 +1335,7 @@ const requestHandler = async (req, res) => {
   if (url.startsWith("/api/ride/request") && method === "POST") {
     const body = await readJson(req);
     if (!body) return json(res, 400, { error: "INVALID_JSON" });
+    if (body.__tooLarge) return json(res, 413, { error: "BODY_TOO_LARGE" });
     if (!requireRoomCodeOr401(body.code, res)) return;
 
     const room = sanitizeRoom(body.room);
@@ -872,11 +1353,39 @@ const requestHandler = async (req, res) => {
     const riderPhone = sanitizePhone(body.phone ?? body.riderPhone);
     const lat = Number(body.lat);
     const lng = Number(body.lng);
-    const targetDriverId = (body.targetDriverId ?? "").toString().trim().slice(0, 80);
+    let targetDriverId = (body.targetDriverId ?? "").toString().trim().slice(0, 80);
     const note = (body.note ?? "").toString().trim().slice(0, 120);
     if (!isValidPhone(riderPhone)) return json(res, 400, { error: "INVALID_RIDER_PHONE" });
-    if (!targetDriverId) return json(res, 400, { error: "MISSING_TARGET_DRIVER_ID" });
     if (!isValidLatLng(lat, lng)) return json(res, 400, { error: "INVALID_LAT_LNG" });
+
+    const registeredDriver = dbGetDriverByPhone(riderPhone);
+    const registeredDriverActive = registeredDriver
+      ? isRegisteredDriverOnlineInRoom(roomState, riderPhone)
+      : false;
+
+    // Block using an active driver's phone number for a rider request.
+    if (registeredDriverActive) {
+      json(res, 409, { error: "RIDER_PHONE_RESERVED" });
+      return;
+    }
+
+    // Prevent two different devices from using the same rider phone for concurrent active requests.
+    // Allow registered drivers to request rides with their own phone when they're not actively online.
+    if (!registeredDriver && isRiderPhoneInUse(roomState, riderPhone, riderId)) {
+      json(res, 409, { error: "RIDER_PHONE_IN_USE" });
+      return;
+    }
+
+    if (!targetDriverId) {
+      const best = pickBestDriver(roomState, lat, lng);
+      if (!best) {
+        json(res, 404, { error: "NO_DRIVERS" });
+        return;
+      }
+      targetDriverId = best.driver.id;
+      // Mark that this request was auto-matched.
+      body.note = "auto";
+    }
 
     const targetDriver = roomState.drivers.get(targetDriverId);
     if (!targetDriver?.available) return json(res, 404, { error: "DRIVER_NOT_FOUND" });
@@ -906,7 +1415,7 @@ const requestHandler = async (req, res) => {
       riderId,
       name,
       riderPhone,
-      note,
+      note: body.note === "auto" ? "auto" : note,
       lat,
       lng,
       status: "pending",
@@ -918,15 +1427,43 @@ const requestHandler = async (req, res) => {
       assignedDriverPhone: null,
     };
     roomState.requests.set(request.id, request);
+    dbUpsertRideRequest(room, request);
 
     sendRequestUpdate(roomState, request, "request:new");
     json(res, 201, { ok: true, request: publicRequest(request) });
     return;
   }
 
+  if (url.startsWith("/api/ride/match") && method === "POST") {
+    const body = await readJson(req);
+    if (!body) return json(res, 400, { error: "INVALID_JSON" });
+    if (body.__tooLarge) return json(res, 413, { error: "BODY_TOO_LARGE" });
+    if (!requireRoomCodeOr401(body.code, res)) return;
+
+    const room = sanitizeRoom(body.room);
+    const lat = Number(body.lat);
+    const lng = Number(body.lng);
+    if (!isValidLatLng(lat, lng)) return json(res, 400, { error: "INVALID_LAT_LNG" });
+
+    const { state: roomState } = getRoomState(room);
+    const best = pickBestDriver(roomState, lat, lng);
+    if (!best) {
+      json(res, 404, { error: "NO_DRIVERS" });
+      return;
+    }
+
+    json(res, 200, {
+      ok: true,
+      driver: { id: best.driver.id, name: best.driver.name },
+      etaMinutes: Math.round(best.eta * 10) / 10,
+    });
+    return;
+  }
+
   if (url.startsWith("/api/ride/cancel") && method === "POST") {
     const body = await readJson(req);
     if (!body) return json(res, 400, { error: "INVALID_JSON" });
+    if (body.__tooLarge) return json(res, 413, { error: "BODY_TOO_LARGE" });
     if (!requireRoomCodeOr401(body.code, res)) return;
 
     const room = sanitizeRoom(body.room);
@@ -942,7 +1479,9 @@ const requestHandler = async (req, res) => {
     }
 
     request.status = "cancelled";
+    unindexAssigned(roomState, request);
     roomState.requests.delete(request.id);
+    dbDeleteRideRequest(request.id);
     sendRequestRemove(roomState, request, "cancelled");
     json(res, 200, { ok: true });
     return;
@@ -951,6 +1490,7 @@ const requestHandler = async (req, res) => {
   if (url.startsWith("/api/ride/accept") && method === "POST") {
     const body = await readJson(req);
     if (!body) return json(res, 400, { error: "INVALID_JSON" });
+    if (body.__tooLarge) return json(res, 413, { error: "BODY_TOO_LARGE" });
     if (!requireRoomCodeOr401(body.code, res)) return;
     const auth = requireDriverSession(req, res, body);
     if (!auth) return;
@@ -979,6 +1519,8 @@ const requestHandler = async (req, res) => {
     request.assignedDriverId = driverId;
     request.assignedDriverName = driverName;
     request.assignedDriverPhone = driverPhone;
+    indexAssigned(roomState, request);
+    dbUpsertRideRequest(room, request);
 
     // Notify rider + assigned driver
     sendRequestUpdate(roomState, request, "request:update");
@@ -991,6 +1533,7 @@ const requestHandler = async (req, res) => {
   if (url.startsWith("/api/ride/decline") && method === "POST") {
     const body = await readJson(req);
     if (!body) return json(res, 400, { error: "INVALID_JSON" });
+    if (body.__tooLarge) return json(res, 413, { error: "BODY_TOO_LARGE" });
     if (!requireRoomCodeOr401(body.code, res)) return;
     const auth = requireDriverSession(req, res, body);
     if (!auth) return;
@@ -1008,7 +1551,9 @@ const requestHandler = async (req, res) => {
     if (request.targetDriverId !== driverId) return json(res, 403, { error: "NOT_TARGET_DRIVER" });
 
     request.status = "declined";
+    unindexAssigned(roomState, request);
     roomState.requests.delete(requestId);
+    dbDeleteRideRequest(requestId);
     sendRequestRemove(roomState, request, "declined");
     json(res, 200, { ok: true });
     return;
@@ -1017,6 +1562,7 @@ const requestHandler = async (req, res) => {
   if (url.startsWith("/api/ride/complete") && method === "POST") {
     const body = await readJson(req);
     if (!body) return json(res, 400, { error: "INVALID_JSON" });
+    if (body.__tooLarge) return json(res, 413, { error: "BODY_TOO_LARGE" });
     if (!requireRoomCodeOr401(body.code, res)) return;
     const auth = requireDriverSession(req, res, body);
     if (!auth) return;
@@ -1035,7 +1581,9 @@ const requestHandler = async (req, res) => {
     }
 
     request.status = "completed";
+    unindexAssigned(roomState, request);
     roomState.requests.delete(requestId);
+    dbDeleteRideRequest(requestId);
     sendRequestRemove(roomState, request, "completed");
     json(res, 200, { ok: true });
     return;
@@ -1055,11 +1603,43 @@ const HTTPS_KEY_FILE =
   (process.env.HTTPS_KEY_FILE ?? path.join(__dirname, "..", ".cert", "key.pem")).trim();
 
 const httpServer = http.createServer(requestHandler);
+// Keep connections open longer (better for SSE + mobile networks).
+httpServer.keepAliveTimeout = 70_000;
+httpServer.headersTimeout = 75_000;
+// SSE connections should not be terminated by requestTimeout.
+httpServer.requestTimeout = 0;
 httpServer.on("error", (err) => {
   // eslint-disable-next-line no-console
   console.error("HTTP server error:", err);
   process.exitCode = 1;
 });
+
+function shutdown(signal) {
+  // eslint-disable-next-line no-console
+  console.log(`Shutting down (${signal})...`);
+  try {
+    for (const roomState of rooms.values()) {
+      for (const sub of roomState.subscribers) {
+        try {
+          sub.res.end();
+        } catch {
+          // ignore
+        }
+      }
+      roomState.subscribers.clear();
+    }
+  } catch {
+    // ignore
+  }
+
+  httpServer.close(() => {
+    process.exit(0);
+  });
+  setTimeout(() => process.exit(0), 5000).unref();
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
 
 httpServer.listen(PORT, HOST, async () => {
   const lanIp = pickLanIp();

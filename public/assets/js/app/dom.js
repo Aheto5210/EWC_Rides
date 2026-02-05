@@ -25,6 +25,7 @@ export const els = {
   btnSwitchToDriver: document.getElementById("btnSwitchToDriver"),
   riderActive: document.getElementById("riderActive"),
   btnCancelRequest: document.getElementById("btnCancelRequest"),
+  btnRequestNearest: document.getElementById("btnRequestNearest"),
   driversSectionTitle: document.getElementById("driversSectionTitle"),
   driversList: document.getElementById("driversList"),
   driversEmpty: document.getElementById("driversEmpty"),
@@ -38,4 +39,5 @@ export const els = {
   sheetClose: document.getElementById("sheetClose"),
   sheetCancel: document.getElementById("sheetCancel"),
   sheetConfirm: document.getElementById("sheetConfirm"),
+  toasts: document.getElementById("toasts"),
 };

@@ -97,8 +97,20 @@ export function etaMinutesFromKm(km, speedKmh) {
 
 export function fmtEtaMinutes(min) {
   if (!Number.isFinite(min)) return "—";
-  if (min < 1) return "< 1 min";
+  if (min < 1) return "1 min";
   return `~${Math.round(min)} min`;
+}
+
+export function fmtEtaSeconds(sec) {
+  const s = Math.max(0, Math.round(Number(sec)));
+  if (!Number.isFinite(s)) return "—";
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  if (m < 60) return `${m}m ${String(r).padStart(2, "0")}s`;
+  const h = Math.floor(m / 60);
+  const mm = m % 60;
+  return `${h}h ${String(mm).padStart(2, "0")}m`;
 }
 
 export function mapsDirectionsUrl({ originLat, originLng, destLat, destLng }) {
@@ -110,4 +122,3 @@ export function mapsDirectionsUrl({ originLat, originLng, destLat, destLng }) {
       : "";
   return `${base}&${dest}${origin}&travelmode=driving`;
 }
-
