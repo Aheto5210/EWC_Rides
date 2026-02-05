@@ -29,6 +29,7 @@ export const els = {
   driversList: document.getElementById("driversList"),
   driversEmpty: document.getElementById("driversEmpty"),
   btnReset: document.getElementById("btnReset"),
+  reloadHint: document.getElementById("reloadHint"),
   sheet: document.getElementById("sheet"),
   sheetOverlay: document.getElementById("sheetOverlay"),
   sheetTitle: document.getElementById("sheetTitle"),

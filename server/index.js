@@ -5,6 +5,7 @@ import os from "node:os";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { DatabaseSync } from "node:sqlite";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -13,7 +14,8 @@ const PORT = Number(process.env.PORT ?? 3000);
 const PUBLIC_DIR = path.join(__dirname, "..", "public");
 
 const ROOM_CODE = (process.env.ROOM_CODE ?? "").trim() || null;
-const DRIVER_DB_FILE = path.join(__dirname, "data", "drivers.json");
+const DRIVER_DB_FILE = path.join(__dirname, "data", "ewc.sqlite");
+const DRIVER_DB_LEGACY_JSON_FILE = path.join(__dirname, "data", "drivers.json");
 const DRIVER_SESSION_TTL_MS =
   clampNumber(Number(process.env.DRIVER_SESSION_TTL_DAYS ?? 14), 1, 180) *
   24 *
@@ -188,6 +190,15 @@ function last4(phoneDigits) {
   return d.slice(Math.max(0, d.length - 4));
 }
 
+function isDriverCodeInUse(code, exceptPhone = "") {
+  const c = digitsOnly(code).slice(0, 4);
+  if (c.length !== 4) return false;
+  const row = dbGetDriverByCode(c);
+  if (!row) return false;
+  if (exceptPhone && row.phone === exceptPhone) return false;
+  return true;
+}
+
 function makeToken() {
   return randomBytes(24).toString("base64url");
 }
@@ -200,29 +211,84 @@ async function ensureDir(dir) {
   }
 }
 
-async function readDriverDb() {
+await ensureDir(path.dirname(DRIVER_DB_FILE));
+const db = new DatabaseSync(DRIVER_DB_FILE);
+db.exec("PRAGMA journal_mode=WAL;");
+db.exec("PRAGMA synchronous=NORMAL;");
+db.exec(`
+  CREATE TABLE IF NOT EXISTS drivers (
+    phone TEXT PRIMARY KEY,
+    code TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+`);
+
+function dbGetDriverByPhone(phone) {
+  return (
+    db
+      .prepare(
+        "SELECT phone, code, name, created_at AS createdAt, updated_at AS updatedAt FROM drivers WHERE phone = ?",
+      )
+      .get(phone) ?? null
+  );
+}
+
+function dbGetDriverByCode(code) {
+  return (
+    db
+      .prepare(
+        "SELECT phone, code, name, created_at AS createdAt, updated_at AS updatedAt FROM drivers WHERE code = ?",
+      )
+      .get(code) ?? null
+  );
+}
+
+function dbInsertDriver({ phone, code, name, now }) {
+  db.prepare(
+    "INSERT INTO drivers (phone, code, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+  ).run(phone, code, name, now, now);
+}
+
+function dbCountDrivers() {
+  const row = db.prepare("SELECT COUNT(1) AS n FROM drivers").get();
+  return Number(row?.n ?? 0);
+}
+
+async function migrateLegacyDriversJson() {
+  if (dbCountDrivers() > 0) return;
   try {
-    const raw = await fs.readFile(DRIVER_DB_FILE, "utf8");
+    const raw = await fs.readFile(DRIVER_DB_LEGACY_JSON_FILE, "utf8");
     const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") return { drivers: {} };
-    if (!parsed.drivers || typeof parsed.drivers !== "object") return { drivers: {} };
-    return { drivers: parsed.drivers };
+    const drivers =
+      parsed && typeof parsed === "object" && parsed.drivers && typeof parsed.drivers === "object"
+        ? parsed.drivers
+        : null;
+    if (!drivers) return;
+
+    for (const [phoneRaw, record] of Object.entries(drivers)) {
+      const phone = sanitizePhone(phoneRaw);
+      if (!isValidPhone(phone)) continue;
+      const name = sanitizeName(record?.name);
+      const code = last4(phone);
+      const now = nowMs();
+      if (dbGetDriverByPhone(phone)) continue;
+      if (dbGetDriverByCode(code)) continue;
+      try {
+        dbInsertDriver({ phone, code, name, now });
+      } catch {
+        // ignore duplicates/bad rows
+      }
+    }
   } catch {
-    return { drivers: {} };
+    // ignore
   }
 }
 
-async function writeDriverDb(db) {
-  await ensureDir(path.dirname(DRIVER_DB_FILE));
-  const tmp = `${DRIVER_DB_FILE}.${randomUUID()}.tmp`;
-  const payload = JSON.stringify(db, null, 2);
-  await fs.writeFile(tmp, payload, "utf8");
-  await fs.rename(tmp, DRIVER_DB_FILE);
-}
+await migrateLegacyDriversJson();
 
-const driverDb = await readDriverDb();
 const driverSessions = new Map(); // token -> { phone, name, createdAt, expiresAt }
-const loginChallenges = new Map(); // id -> { phones: string[], expiresAt: number }
 
 function getAuthToken(req, fallbackFromBody = null) {
   const hdr = (req.headers?.authorization ?? "").toString().trim();
@@ -617,14 +683,25 @@ const requestHandler = async (req, res) => {
     if (!isValidPhone(phone)) return json(res, 400, { error: "INVALID_PHONE" });
 
     const now = nowMs();
-    const existing = driverDb.drivers[phone];
-    driverDb.drivers[phone] = {
-      phone,
-      name,
-      createdAt: existing?.createdAt ?? now,
-      updatedAt: now,
-    };
-    await writeDriverDb(driverDb);
+    if (dbGetDriverByPhone(phone)) {
+      json(res, 409, { error: "PHONE_IN_USE" });
+      return;
+    }
+
+    const code = last4(phone);
+    if (isDriverCodeInUse(code, phone)) {
+      json(res, 409, { error: "CODE_IN_USE" });
+      return;
+    }
+
+    try {
+      dbInsertDriver({ phone, code, name, now });
+    } catch {
+      // If another registration raced us.
+      if (dbGetDriverByPhone(phone)) return json(res, 409, { error: "PHONE_IN_USE" });
+      if (dbGetDriverByCode(code)) return json(res, 409, { error: "CODE_IN_USE" });
+      return json(res, 500, { error: "REGISTER_FAILED" });
+    }
 
     setCookie(res, "ewc_driver_phone", phone, {
       maxAgeSeconds: Math.floor(DRIVER_SESSION_TTL_MS / 1_000),
@@ -636,7 +713,7 @@ const requestHandler = async (req, res) => {
     json(res, 201, {
       ok: true,
       driver: { name, phoneLast4: last4(phone) },
-      code: last4(phone),
+      code,
     });
     return;
   }
@@ -645,45 +722,12 @@ const requestHandler = async (req, res) => {
     const body = await readJson(req);
     if (!body) return json(res, 400, { error: "INVALID_JSON" });
 
-    const cookies = parseCookies(req);
-    const phoneFromBody = sanitizePhone(body.phone);
-    const cookiePhone = sanitizePhone(cookies.ewc_driver_phone);
-    let phone = sanitizePhone(phoneFromBody || cookiePhone);
     const code = digitsOnly(body.code).slice(0, 4);
     if (!code || code.length !== 4) return json(res, 400, { error: "INVALID_CODE" });
 
-    if (!isValidPhone(phone)) {
-      const matches = [];
-      for (const [p] of Object.entries(driverDb.drivers)) {
-        if (last4(p) !== code) continue;
-        matches.push(p);
-      }
-
-      if (matches.length === 0) return json(res, 404, { error: "DRIVER_NOT_REGISTERED" });
-
-      if (matches.length === 1) {
-        phone = sanitizePhone(matches[0]);
-      } else {
-        const challengeId = makeToken();
-        loginChallenges.set(challengeId, {
-          phones: matches.map((p) => sanitizePhone(p)),
-          expiresAt: nowMs() + 5 * 60_000,
-        });
-        json(res, 409, {
-          error: "CODE_AMBIGUOUS",
-          challengeId,
-          choices: matches.map((p) => ({
-            name: driverDb.drivers[p]?.name ?? "Driver",
-          })),
-        });
-        return;
-      }
-    }
-
-    const record = driverDb.drivers[phone];
+    const record = dbGetDriverByCode(code);
     if (!record) return json(res, 404, { error: "DRIVER_NOT_REGISTERED" });
-    const expected = last4(phone);
-    if (code !== expected) return json(res, 401, { error: "INVALID_CODE" });
+    const phone = sanitizePhone(record.phone);
 
     const token = makeToken();
     const now = nowMs();
@@ -704,54 +748,7 @@ const requestHandler = async (req, res) => {
     json(res, 200, {
       ok: true,
       token,
-      driver: { name: record.name, phone, phoneLast4: expected },
-    });
-    return;
-  }
-
-  if (url.startsWith("/api/auth/driver/login/resolve") && method === "POST") {
-    const body = await readJson(req);
-    if (!body) return json(res, 400, { error: "INVALID_JSON" });
-
-    const challengeId = (body.challengeId ?? "").toString().trim();
-    const idx = Number(body.choiceIndex);
-    if (!challengeId) return json(res, 400, { error: "MISSING_CHALLENGE" });
-    if (!Number.isInteger(idx) || idx < 0) return json(res, 400, { error: "INVALID_CHOICE" });
-
-    const challenge = loginChallenges.get(challengeId);
-    if (!challenge) return json(res, 404, { error: "CHALLENGE_NOT_FOUND" });
-    if (challenge.expiresAt < nowMs()) {
-      loginChallenges.delete(challengeId);
-      return json(res, 410, { error: "CHALLENGE_EXPIRED" });
-    }
-
-    const phone = challenge.phones[idx];
-    if (!phone) return json(res, 400, { error: "INVALID_CHOICE" });
-
-    const record = driverDb.drivers[phone];
-    if (!record) return json(res, 404, { error: "DRIVER_NOT_REGISTERED" });
-
-    const token = makeToken();
-    const now = nowMs();
-    driverSessions.set(token, {
-      phone,
-      name: record.name,
-      createdAt: now,
-      expiresAt: now + DRIVER_SESSION_TTL_MS,
-    });
-    loginChallenges.delete(challengeId);
-
-    setCookie(res, "ewc_driver_phone", phone, {
-      maxAgeSeconds: Math.floor(DRIVER_SESSION_TTL_MS / 1_000),
-      httpOnly: true,
-      sameSite: "Lax",
-      secure: false,
-    });
-
-    json(res, 200, {
-      ok: true,
-      token,
-      driver: { name: record.name, phone, phoneLast4: last4(phone) },
+      driver: { name: record.name, phone, phoneLast4: code },
     });
     return;
   }

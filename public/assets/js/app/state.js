@@ -55,6 +55,13 @@ export function createState() {
       requestId: localStorage.getItem(STORAGE_KEYS.riderRequestId) || "",
       locked: false,
       assigned: null,
+      assignedRequestId: "",
+      assignedDriverId: "",
+      acceptedAt: 0,
+      tracking: {
+        lastKm: null,
+        lastSampleAt: 0,
+      },
     },
     live: {
       drivers: new Map(),

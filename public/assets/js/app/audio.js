@@ -59,55 +59,51 @@ export function createAudio({ state } = {}) {
     }
   }
 
-  function playAlarmWebAudio() {
+  function playBellWebAudio() {
     const ctx = ensureAudioContext();
     if (!ctx) return;
     if (ctx.state === "suspended") ctx.resume().catch(() => {});
 
-    const master = ctx.createGain();
-    master.gain.value = 0.0;
-    master.connect(ctx.destination);
-
     const t0 = ctx.currentTime + 0.02;
-    const volume = 0.09;
+    const out = ctx.createGain();
+    out.gain.setValueAtTime(0.0001, t0);
+    out.connect(ctx.destination);
 
-    const osc = ctx.createOscillator();
-    osc.type = "square";
+    // Simple bell-ish chime: a few partials with fast attack + exponential decay.
+    const partials = [
+      { f: 880, a: 0.11, d: 0.9 },
+      { f: 1320, a: 0.075, d: 0.7 },
+      { f: 1760, a: 0.05, d: 0.55 },
+    ];
 
-    const filter = ctx.createBiquadFilter();
-    filter.type = "lowpass";
-    filter.frequency.setValueAtTime(2600, t0);
+    for (const p of partials) {
+      const osc = ctx.createOscillator();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(p.f, t0);
 
-    osc.connect(filter);
-    filter.connect(master);
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.linearRampToValueAtTime(p.a, t0 + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + p.d);
+      osc.connect(g);
+      g.connect(out);
 
-    const ring = (start, f1, f2) => {
-      osc.frequency.setValueAtTime(f1, start);
-      osc.frequency.setValueAtTime(f2, start + 0.09);
+      osc.start(t0);
+      osc.stop(t0 + p.d + 0.05);
+      osc.onended = () => {
+        try {
+          osc.disconnect();
+          g.disconnect();
+        } catch {
+          // ignore
+        }
+      };
+    }
 
-      master.gain.setValueAtTime(0, start);
-      master.gain.linearRampToValueAtTime(volume, start + 0.01);
-      master.gain.linearRampToValueAtTime(0, start + 0.06);
-      master.gain.setValueAtTime(0, start + 0.09);
-      master.gain.linearRampToValueAtTime(volume, start + 0.10);
-      master.gain.linearRampToValueAtTime(0, start + 0.16);
-    };
-
-    ring(t0, 880, 988);
-    ring(t0 + 0.22, 988, 1046);
-
-    osc.start(t0);
-    osc.stop(t0 + 0.44);
-
-    osc.onended = () => {
-      try {
-        osc.disconnect();
-        filter.disconnect();
-        master.disconnect();
-      } catch {
-        // ignore
-      }
-    };
+    // Gentle overall envelope to avoid clicks.
+    out.gain.setValueAtTime(0.0001, t0);
+    out.gain.linearRampToValueAtTime(0.9, t0 + 0.01);
+    out.gain.exponentialRampToValueAtTime(0.0001, t0 + 1.0);
   }
 
   function playAcceptedSound() {
@@ -171,12 +167,12 @@ export function createAudio({ state } = {}) {
       const p = sample.play();
       if (p && typeof p.catch === "function") p.catch(() => {});
       setTimeout(() => {
-        if (sample.paused) playAlarmWebAudio();
+        if (sample.paused) playBellWebAudio();
       }, 160);
       return;
     }
 
-    playAlarmWebAudio();
+    playBellWebAudio();
   }
 
   function hasPendingDriverRequests() {
@@ -201,7 +197,7 @@ export function createAudio({ state } = {}) {
         return;
       }
       playNotificationSound();
-    }, 4500);
+    }, 1000);
   }
 
   function updateRequestAlarm() {
@@ -222,4 +218,3 @@ export function createAudio({ state } = {}) {
     stopRequestAlarm,
   };
 }
-

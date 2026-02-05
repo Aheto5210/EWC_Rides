@@ -256,6 +256,11 @@ function connectStream() {
           name: r.assignedDriverName || "driver",
           phone: r.assignedDriverPhone || "",
         };
+        state.rider.assignedRequestId = r.id;
+        state.rider.assignedDriverId = r.assignedDriverId || "";
+        state.rider.acceptedAt = Date.now();
+        state.rider.tracking.lastKm = null;
+        state.rider.tracking.lastSampleAt = 0;
         state.rider.requestId = "";
         localStorage.removeItem(STORAGE_KEYS.riderRequestId);
         addActivity(state, els, "Driver accepted", `${r.assignedDriverName || "driver"}`, "success", {
@@ -288,6 +293,22 @@ function connectStream() {
       } else if (reason === "declined") {
         addActivity(state, els, "Request declined", "Pick another driver.", "danger");
       }
+    }
+
+    if (state.role === "rider" && state.rider.assignedRequestId === id) {
+      const label =
+        reason === "completed"
+          ? "Pickup completed"
+          : reason === "cancelled"
+            ? "Pickup cancelled"
+            : reason === "declined"
+              ? "Pickup declined"
+              : "Pickup update";
+      addActivity(state, els, label, "This ride is no longer active.", "info");
+      state.rider.assignedRequestId = "";
+      state.rider.assignedDriverId = "";
+      state.rider.tracking.lastKm = null;
+      state.rider.tracking.lastSampleAt = 0;
     }
 
     if (state.role === "driver" && prev && prev.status === "pending") {
@@ -845,13 +866,80 @@ function renderRiderView() {
     els.riderActive.hidden = false;
     const phoneDigits = digitsOnly(state.rider.assigned?.phone || "");
     const driverName = state.rider.assigned?.name || "driver";
+    const driverId = state.rider.assignedDriverId || "";
+    const driver = driverId ? state.live.drivers.get(driverId) : null;
+    const updatedAt = driver?.last?.updatedAt ?? 0;
+    const age = updatedAt ? fmtAgeMs(Date.now() - updatedAt) : "—";
+
+    let etaLabel = "—";
+    let statusText = "Driver is on the way";
+    let statusTone = "info";
+
+    if (state.geo.last && driver?.last) {
+      const km = haversineKm(state.geo.last.lat, state.geo.last.lng, driver.last.lat, driver.last.lng);
+      const speedKmhRaw = Number(state.config?.assumedSpeedKmh);
+      const speedKmh = Number.isFinite(speedKmhRaw) ? speedKmhRaw : 40;
+      const eta = etaMinutesFromKm(km, speedKmh);
+      const etaSec = Number.isFinite(eta) ? eta * 60 : Infinity;
+      if (etaSec <= 10) {
+        etaLabel = "Arrived";
+        statusText = "Driver has arrived";
+        statusTone = "success";
+      } else {
+        etaLabel = fmtEtaMinutes(eta);
+      }
+
+      const prevKm = state.rider.tracking.lastKm;
+      const prevAt = state.rider.tracking.lastSampleAt;
+      const now = Date.now();
+      if (
+        statusText !== "Driver has arrived" &&
+        typeof prevKm === "number" &&
+        Number.isFinite(prevKm) &&
+        now - prevAt < 60_000
+      ) {
+        const diff = km - prevKm;
+        if (diff < -0.03) {
+          statusText = "Driver is getting closer";
+          statusTone = "success";
+        } else if (diff > 0.03) {
+          statusText = "Driver may be moving away";
+          statusTone = "warning";
+        } else {
+          statusText = "Driver is on the way";
+          statusTone = "info";
+        }
+      }
+      state.rider.tracking.lastKm = km;
+      state.rider.tracking.lastSampleAt = Date.now();
+    } else if (driver?.last) {
+      statusText = "Driver is on the way";
+      statusTone = "info";
+    } else {
+      statusText = "Driver is on the way";
+      statusTone = "info";
+    }
+
+    const sinceMin = state.rider.acceptedAt
+      ? Math.max(0, Math.round((Date.now() - state.rider.acceptedAt) / 60_000))
+      : 0;
     els.riderActive.innerHTML = `
       <div class="notice__title">Driver accepted</div>
-      <div class="notice__text">Name: ${escapeHtml(driverName)}</div>
+      <div class="notice__text">Driver: <strong>${escapeHtml(driverName)}</strong></div>
       <div class="notice__text metaRow"><span>Call driver</span>${
         phoneDigits ? callButtonHtml(phoneDigits, `Call ${driverName}`) : ""
       }</div>
-      <div class="notice__text">Reload the page to start a new request.</div>
+      <div class="card__divider"></div>
+      <div class="statsRow">
+        <div class="statChip">
+          <div class="statChip__label">Time</div>
+          <div class="statChip__value">${escapeHtml(etaLabel)}</div>
+        </div>
+      </div>
+      <div class="statusTag statusTag--${escapeHtml(statusTone)}">${escapeHtml(statusText)}</div>
+      <div class="notice__text" style="margin-top: 10px;">Last update: ${escapeHtml(
+        age,
+      )} ago • Accepted: ${escapeHtml(String(sinceMin))} min ago</div>
     `;
     els.driversList.innerHTML = "";
     els.driversEmpty.textContent = "";
@@ -898,6 +986,7 @@ function renderAll() {
   els.driverCard.hidden = state.role !== "driver";
   els.riderCard.hidden = state.role !== "rider";
   els.roleCard.hidden = state.role === "driver" || state.role === "rider";
+  if (els.reloadHint) els.reloadHint.hidden = !(state.role === "rider" && state.rider.locked);
   renderDriverView();
   renderRiderView();
 }
@@ -983,7 +1072,13 @@ function initEvents() {
       }
       renderAll();
     } catch (e) {
-      alert(`Could not register: ${e.message}`);
+      const msg =
+        e.message === "PHONE_IN_USE"
+          ? "This phone number is already registered. Tap “I’m a Driver” and enter your code."
+          : e.message === "CODE_IN_USE"
+            ? "This code is already in use by another driver. Please use a different phone number."
+            : e.message;
+      alert(`Could not register: ${msg}`);
     } finally {
       els.btnRegisterDriver.disabled = false;
     }
@@ -1059,6 +1154,14 @@ async function init() {
     if (state.role !== "driver" && state.role !== "rider") return;
     renderAll();
   }, 10_000);
+
+  setInterval(() => {
+    if (document.visibilityState !== "visible") return;
+    if (state.ui.activeTab !== "home") return;
+    if (state.role !== "rider") return;
+    if (!state.rider.locked) return;
+    renderRiderView();
+  }, 1_000);
 
   renderAll();
 }
