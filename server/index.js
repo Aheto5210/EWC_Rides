@@ -1023,6 +1023,13 @@ const requestHandler = async (req, res) => {
   const method = req.method ?? "GET";
   const url = req.url ?? "/";
 
+  if (method === "OPTIONS") {
+    setCORSHeaders(res);
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
   if (url.startsWith("/api/health") && method === "GET") {
     json(res, 200, { ok: true, now: nowMs() });
     return;
@@ -1070,10 +1077,11 @@ const requestHandler = async (req, res) => {
 
     const { id: roomId, state: roomState } = getRoomState(room);
 
+    setCORSHeaders(res);
     res.writeHead(200, {
       "content-type": "text/event-stream",
       "cache-control": "no-store",
-      connection: "keep-alive",
+      "connection": "keep-alive",
     });
     res.write("\n");
 
