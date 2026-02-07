@@ -100,8 +100,16 @@ function clampNumber(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 
+function setCORSHeaders(res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With");
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+}
+
 function json(res, statusCode, body) {
   const payload = JSON.stringify(body);
+  setCORSHeaders(res);
   res.writeHead(statusCode, {
     "content-type": "application/json; charset=utf-8",
     "content-length": Buffer.byteLength(payload),
@@ -947,6 +955,7 @@ async function serveStatic(req, res) {
 
     const inm = (req.headers["if-none-match"] ?? "").toString();
     if (inm && inm === etag) {
+      setCORSHeaders(res);
       res.writeHead(304, {
         etag,
         "cache-control": ext === ".html" ? "no-store" : "public, max-age=3600",
@@ -964,6 +973,7 @@ async function serveStatic(req, res) {
 
     const cached = STATIC_CACHE_MAX_BYTES > 0 ? staticCache.get(filePath) : null;
     if (cached && cached.etag === etag) {
+      setCORSHeaders(res);
       res.writeHead(200, {
         "content-type": cached.contentType ?? "application/octet-stream",
         "content-length": cached.data.length,
@@ -977,6 +987,7 @@ async function serveStatic(req, res) {
     }
 
     const data = await fs.readFile(filePath);
+    setCORSHeaders(res);
     res.writeHead(200, {
       "content-type": contentType ?? "application/octet-stream",
       "content-length": data.length,
