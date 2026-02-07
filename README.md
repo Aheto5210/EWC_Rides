@@ -23,11 +23,11 @@ Most active days: **Tuesday / Thursday / Sunday**.
 npm run dev
 ```
 
-Then open `http://localhost:3000`.
+Then open `http://localhost:3331`.
 
 ## Test on a phone (location)
 
-Mobile browsers typically require a **secure context** for location. If you open the app from your phone using an IP like `http://192.168.x.x:3000`, location may be blocked.
+Mobile browsers typically require a **secure context** for location. If you open the app from your phone using an IP like `http://192.168.x.x:3331`, location may be blocked.
 
 Recommended options:
 
@@ -50,7 +50,7 @@ The “new request” alert uses `public/assets/drivernotify.mp3`.
 
 Environment variables:
 
-- `PORT` (default `3000`)
+- `PORT` (default `3331`)
 - `ROOM_CODE` (optional) — if set, clients must provide the code to connect / post updates
 - `MAX_PICKUP_MINUTES` (default `10`) — approximate “within X minutes”
 - `ASSUMED_SPEED_KMH` (default `40`) — used to convert distance → minutes
@@ -83,7 +83,7 @@ Minimal Nginx snippet (inside your `server { ... }`):
 
 ```nginx
 location /api/stream {
-  proxy_pass http://127.0.0.1:3000;
+  proxy_pass http://127.0.0.1:3331;
   proxy_http_version 1.1;
   proxy_set_header Connection "";
   proxy_buffering off;
@@ -91,7 +91,7 @@ location /api/stream {
 }
 
 location / {
-  proxy_pass http://127.0.0.1:3000;
+  proxy_pass http://127.0.0.1:3331;
 }
 ```
 

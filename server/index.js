@@ -10,7 +10,7 @@ import Database from "better-sqlite3";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const PORT = Number(process.env.PORT ?? 3000);
+const PORT = Number(process.env.PORT ?? 3331);
 const PUBLIC_DIR = process.env.PUBLIC_DIR || path.join(__dirname, "..", "public");
 
 const ROOM_CODE = (process.env.ROOM_CODE ?? "").trim() || null;
