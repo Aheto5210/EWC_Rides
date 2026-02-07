@@ -5,13 +5,13 @@ import os from "node:os";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { DatabaseSync } from "node:sqlite";
+import Database from "better-sqlite3";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = Number(process.env.PORT ?? 3000);
-const PUBLIC_DIR = path.join(__dirname, "..", "public");
+const PUBLIC_DIR = process.env.PUBLIC_DIR || path.join(__dirname, "..", "public");
 
 const ROOM_CODE = (process.env.ROOM_CODE ?? "").trim() || null;
 const DRIVER_DB_FILE = path.join(__dirname, "data", "ewc.sqlite");
@@ -261,14 +261,14 @@ async function ensureDir(dir) {
 }
 
 await ensureDir(path.dirname(DRIVER_DB_FILE));
-const db = new DatabaseSync(DRIVER_DB_FILE);
-db.exec("PRAGMA journal_mode=WAL;");
-db.exec("PRAGMA synchronous=NORMAL;");
-db.exec("PRAGMA busy_timeout=5000;");
-db.exec("PRAGMA temp_store=MEMORY;");
+const db = new Database(DRIVER_DB_FILE, { fileMustExist: false });
+db.pragma("journal_mode = WAL");
+db.pragma("synchronous = NORMAL");
+db.pragma("busy_timeout = 5000");
+db.pragma("temp_store = MEMORY");
 // A modest cache helps reduce IO on VPS disks.
 try {
-  db.exec("PRAGMA cache_size=-4000;"); // ~4MB
+  db.pragma("cache_size = -4000"); // ~4MB
 } catch {
   // ignore
 }

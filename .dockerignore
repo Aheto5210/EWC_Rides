@@ -1,0 +1,16 @@
+node_modules
+npm-debug.log
+.git
+.gitignore
+.env
+.env.example
+.server/data/*
+*.db
+*.db-shm
+*.db-wal
+.DS_Store
+cert
+.vscode
+.idea
+*.md
+build/

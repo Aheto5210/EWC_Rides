@@ -1,7 +1,10 @@
+const API_BASE = "__API_BASE_URL__";
+
 export async function api(path, { method = "GET", body, headers: extraHeaders } = {}) {
   const headers = { ...(extraHeaders || {}) };
   if (body) headers["content-type"] = headers["content-type"] || "application/json";
-  const res = await fetch(path, {
+  const url = path.startsWith("http") ? path : `${API_BASE}${path}`;
+  const res = await fetch(url, {
     method,
     headers,
     body: body ? JSON.stringify(body) : undefined,

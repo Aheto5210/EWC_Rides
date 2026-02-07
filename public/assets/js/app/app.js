@@ -1,4 +1,6 @@
 import { STORAGE_KEYS } from "./constants.js";
+
+const API_BASE = "__API_BASE_URL__";
 import { api } from "./api.js";
 import { addActivity, clearActivity, renderActivity } from "./activity.js";
 import {
@@ -192,7 +194,7 @@ function connectStream() {
     params.set("token", state.driver.auth.token);
   }
 
-  state.eventSource = new EventSource(`/api/stream?${params.toString()}`);
+  state.eventSource = new EventSource(`${API_BASE}/api/stream?${params.toString()}`);
 
   state.eventSource.addEventListener("snapshot", (evt) => {
     const data = JSON.parse(evt.data);
