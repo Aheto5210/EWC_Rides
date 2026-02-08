@@ -249,7 +249,17 @@ body {
   border-radius: var(--radius);
   border: 1px solid var(--border);
   background: var(--input-bg);
-  color: var(--text);
+  color: var(
+    -- /* ...existing code... */ .sheet,
+    .popup {/* ensure inputs aren't covered by bottom inset / keyboard area */
+      padding-bottom: calc(env(safe-area-inset-bottom, 16px) + 20px) ;
+      box-sizing: border-box;}
+      /* also ensure inner scrollable content reserves the same bottom space */
+      .sheet__content,
+    .popup__content
+      {padding-bottom: calc(env(safe-area-inset-bottom, 16px) + 20px) ;}
+      /* ...existing code... */ text
+  );
   outline: none;
   transition:
     border-color var(--dur-2) var(--ease-soft),
@@ -288,7 +298,7 @@ select {
   border: 1px solid var(--border);
   background: var(--btn-bg);
   color: var(--text);
-  padding: 12px 14px;
+  padding: 14px 16px;
   border-radius: var(--radius);
   cursor: pointer;
   font-weight: 750;
@@ -971,6 +981,7 @@ select {
   z-index: 50;
   display: grid;
   align-items: end;
+  overflow: visible;
 }
 
 .sheet[hidden] {
