@@ -1,4 +1,4 @@
-const CACHE_NAME = "ewc-rides-v81";
+const CACHE_NAME = "ewc-rides-v82";
 const ASSETS = [
   "/",
   "/index.html",

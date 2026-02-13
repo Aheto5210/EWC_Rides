@@ -484,6 +484,19 @@ select {
     background var(--dur-2) var(--ease-soft);
 }
 
+.item--clickable {
+  cursor: pointer;
+}
+
+.item--clickable:active {
+  transform: translateY(1px);
+}
+
+.item--disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
 .item--activity {
   position: relative;
   overflow: hidden;

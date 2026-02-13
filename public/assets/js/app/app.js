@@ -723,7 +723,7 @@ function driverRequestItem(req) {
   return el;
 }
 
-function driverListItem(driver, { showRequest = true } = {}) {
+function driverListItem(driver, { showRequest = true, interactive = false } = {}) {
   const el = document.createElement("div");
   el.className = "item";
   const updatedAt = driver.last?.updatedAt ?? 0;
@@ -748,6 +748,14 @@ function driverListItem(driver, { showRequest = true } = {}) {
   const hasActive = Boolean(getActiveRiderRequest());
   const disabled = state.rider.locked || hasActive || !state.geo.last || !driver.last || isTooFar;
 
+  if (interactive) {
+    el.classList.add("item--clickable");
+    if (disabled) el.classList.add("item--disabled");
+    el.setAttribute("role", "button");
+    el.setAttribute("tabindex", disabled ? "-1" : "0");
+    el.setAttribute("aria-disabled", disabled ? "true" : "false");
+  }
+
   el.innerHTML = `
     <div class="item__top">
       <div>
@@ -769,12 +777,13 @@ function driverListItem(driver, { showRequest = true } = {}) {
     }
   `;
 
-  if (showRequest) {
-    const btn = el.querySelector('[data-action="request"]');
-    btn?.addEventListener("click", async () => {
-      btn.disabled = true;
+  const attachRequestHandler = (triggerEl) => {
+    if (disabled) return;
+    triggerEl?.addEventListener("click", async () => {
+      if (disabled) return;
+      if (triggerEl instanceof HTMLButtonElement) triggerEl.disabled = true;
       try {
-        const contact = await promptRiderContact(driver.name);
+        const contact = getSavedRiderContact() || (await promptRiderContact(driver.name));
         if (!contact) return;
         await requestPickup(driver.id, { name: contact.name, phone: contact.phone });
       } catch (e) {
@@ -798,7 +807,20 @@ function driverListItem(driver, { showRequest = true } = {}) {
                     : e.message;
         notify({ title: "Request pickup", body: msg, tone: "danger", durationMs: 5500 });
       } finally {
-        btn.disabled = false;
+        if (triggerEl instanceof HTMLButtonElement) triggerEl.disabled = false;
+      }
+    });
+  };
+
+  if (showRequest) {
+    const btn = el.querySelector('[data-action="request"]');
+    attachRequestHandler(btn);
+  } else if (interactive) {
+    attachRequestHandler(el);
+    el.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        el.click();
       }
     });
   }
@@ -987,7 +1009,9 @@ function renderRiderView() {
 
   if (els.driversList) {
     els.driversList.innerHTML = "";
-    for (const d of drivers) els.driversList.appendChild(driverListItem(d, { showRequest: false }));
+    for (const d of drivers) {
+      els.driversList.appendChild(driverListItem(d, { showRequest: false, interactive: true }));
+    }
   }
 
   if (els.driversEmpty) {
