@@ -881,6 +881,20 @@ function cleanupStale() {
         // ignore
       }
       sendDriverRemove(roomState, driverId);
+
+      // If a driver goes stale/offline, clear any pending requests targeting them immediately.
+      for (const [requestId, req] of roomState.requests.entries()) {
+        if (!req) continue;
+        if (req.status !== "pending") continue;
+        if (req.targetDriverId !== driverId) continue;
+        roomState.requests.delete(requestId);
+        try {
+          dbDeleteRideRequest(requestId);
+        } catch {
+          // ignore
+        }
+        sendRequestRemove(roomState, req, "driver_offline");
+      }
     }
 
     for (const [requestId, req] of roomState.requests.entries()) {
@@ -1347,6 +1361,21 @@ const requestHandler = async (req, res) => {
     roomState.drivers.delete(driverId);
     dbDeleteOnlineDriver(room, driverId);
     sendDriverRemove(roomState, driverId);
+
+    // Clear any pending requests for this driver so riders can retry immediately.
+    for (const [requestId, req] of roomState.requests.entries()) {
+      if (!req) continue;
+      if (req.status !== "pending") continue;
+      if (req.targetDriverId !== driverId) continue;
+      roomState.requests.delete(requestId);
+      try {
+        dbDeleteRideRequest(requestId);
+      } catch {
+        // ignore
+      }
+      sendRequestRemove(roomState, req, "driver_offline");
+    }
+
     json(res, 200, { ok: true });
     return;
   }
