@@ -783,7 +783,7 @@ function driverListItem(driver, { showRequest = true, interactive = false } = {}
       if (disabled) return;
       if (triggerEl instanceof HTMLButtonElement) triggerEl.disabled = true;
       try {
-        const contact = getSavedRiderContact() || (await promptRiderContact(driver.name));
+        const contact = await promptRiderContact(driver.name);
         if (!contact) return;
         await requestPickup(driver.id, { name: contact.name, phone: contact.phone });
       } catch (e) {
