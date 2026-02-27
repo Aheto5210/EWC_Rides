@@ -1,11 +1,4 @@
-const RAW_API_BASE = "__API_BASE_URL__";
-
-export const API_BASE = (() => {
-  const raw = String(RAW_API_BASE || "").trim();
-  // If the placeholder is not replaced at build time, fall back to same-origin API.
-  if (!raw || raw.includes("__API_BASE_URL__")) return "";
-  return raw.endsWith("/") ? raw.slice(0, -1) : raw;
-})();
+const API_BASE = "__API_BASE_URL__";
 
 export async function api(path, { method = "GET", body, headers: extraHeaders } = {}) {
   const headers = { ...(extraHeaders || {}) };
