@@ -4,9 +4,12 @@ This is a lightweight mobile-first web app for church members:
 
 - Users **register with email + password** and choose a role (**driver** or **rider**).
 - **Drivers** go online to share live location.
-- **Riders** see a **list of available drivers** with distance/ETA.
+- **Drivers** must set their destination before going online.
+- **Riders** set their destination and see only matching drivers on similar routes.
+- Matching prioritizes closest cars first and limits suggestions to about **20 minutes**.
 - Riders tap a driver to send a **pickup request** to that driver.
 - Drivers can **accept** and **open Google Maps** to navigate to pickup.
+- Activity tab shows server-backed ride history for each signed-in user.
 
 Most active days: **Tuesday / Thursday / Sunday**.
 
@@ -53,7 +56,7 @@ Environment variables:
 
 - `PORT` (default `3331`)
 - `ROOM_CODE` (optional) — if set, clients must provide the code to connect / post updates
-- `MAX_PICKUP_MINUTES` (default `10`) — approximate “within X minutes”
+- `MAX_PICKUP_MINUTES` (default `20`) — approximate “within X minutes”
 - `ASSUMED_SPEED_KMH` (default `40`) — used to convert distance → minutes
 - `MAX_PICKUP_DISTANCE_KM` (optional) — overrides the derived distance from minutes/speed
 - `MAX_ACTIVE_REQUESTS_PER_DRIVER` (default `3`)

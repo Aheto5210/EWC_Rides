@@ -1,158 +1,29 @@
-# EWC Rides — Mobile API (Flutter) Guide
+# EWC Rides Mobile API
 
-This document describes the backend API you can use from the Flutter mobile app.
+Use this document for Flutter integration with the current backend.
 
 ## Base URL
 
-Use your backend base URL, for example:
+- Production: `https://ewc-rides.onrender.com`
+- Local: `http://localhost:3331`
 
-- `https://ewc-rides.onrender.com`
+All endpoints below are relative to your selected base URL.
 
-All endpoints below are relative to the base URL.
+## Core rules
 
-## Common concepts
+- Most requests include `room` (use `"ewc"` by default).
+- If server uses `ROOM_CODE`, include `code` in API bodies and SSE query.
+- Persist one UUID per device for `driverId` / `riderId`.
+- Auth uses bearer tokens: `Authorization: Bearer <token>`.
 
-### `room`
+---
 
-- Most requests include a `room` (string). If omitted on the web app, it defaults to `ewc`.
-- Recommended: always send `room: "ewc"` unless you intentionally support multiple rooms.
+## Auth
 
-### `code` (optional room code)
+### Register
 
-- If the server is configured with `ROOM_CODE`, then **every API call** and the SSE stream must include `code`.
-- If `ROOM_CODE` is not enabled on the server, you can omit it.
+`POST /api/auth/register`
 
-### `deviceId`
-
-- The server expects a device identifier in SSE query params (`id=...`) and in several POST bodies (`driverId`, `riderId`).
-- On Flutter, generate a UUID on first launch and persist it (SharedPreferences / secure storage).
-
-### Auth
-
-- Users authenticate with `email + password`.
-- Registration requires choosing a role: `driver` or `rider`.
-- Login returns a `token` (bearer token). Send it as:
-  - `Authorization: Bearer <token>`
-
-## Responses and errors
-
-- Errors are returned as JSON: `{ "error": "SOME_CODE" }`
-- HTTP status varies by error (400/401/403/404/409/413/500).
-
-## Endpoints
-
-### Health
-
-**GET** `/api/health`
-
-Use this to check if the backend is reachable.
-
-Response:
-```json
-{ "ok": true, "now": 1730000000000 }
-```
-
-### Config
-
-**GET** `/api/config`
-
-Response includes tuning values the UI can use:
-```json
-{
-  "roomCodeRequired": false,
-  "maxPickupDistanceKm": 6.66,
-  "maxPickupMinutes": 10,
-  "assumedSpeedKmh": 40,
-  "maxActiveRequestsPerDriver": 3,
-  "requestTtlMinutes": 5,
-  "driverStaleSeconds": 45,
-  "daysOpen": ["Tuesday","Thursday","Sunday"]
-}
-```
-
-## Live stream (SSE)
-
-### Connect
-
-**GET** `/api/stream?room=<room>&role=<driver|rider>&id=<deviceId>[&code=<roomCode>][&token=<driverToken>]`
-
-Notes:
-- `role=rider` does **not** require a token.
-- `role=driver` **requires** `token=<driverToken>` or you will get `401`.
-
-### Events
-
-You will receive events like:
-
-- `snapshot` (initial + periodic for riders)
-- `driver:update`
-- `driver:remove`
-- `request:new`
-- `request:update`
-- `request:remove`
-- `ping`
-
-Each event’s payload is JSON in the `data:` line.
-
-## Recommended real-time strategy (Flutter)
-
-Use **SSE as the primary real-time channel**, with a small polling fallback.
-
-### Why SSE (recommended)
-
-- Lower overhead than frequent polling.
-- Matches the backend’s existing design (`/api/stream` already powers the web app).
-- Great fit for “push” events: new requests, accept/decline, assigned-driver location updates.
-
-### Mobile constraints to plan for
-
-- Phones can pause/throttle networking when the app is backgrounded.
-- Some networks drop long-lived connections.
-- You should implement reconnect + fallback.
-
-### Suggested app behavior
-
-- Foreground (Home/Driver/Rider screens): keep an SSE connection open.
-- Backgrounded: disconnect SSE (or expect it to be killed) and resume on foreground.
-- If SSE disconnects unexpectedly: retry with backoff; if it keeps failing, use polling for a short period.
-
-### Reconnect policy (simple + solid)
-
-- Retry delays: `1s → 2s → 5s → 10s → 20s` (cap at 20s)
-- Reset backoff after you receive a valid `snapshot`.
-
-### Polling fallback (minimal)
-
-If SSE is down, you can poll these endpoints:
-- `GET /api/config` every ~60s (optional)
-- Reconnect SSE in the background
-
-Note: the backend does **not** currently expose “poll equivalents” for everything (drivers list + rider request state) as dedicated REST endpoints; SSE `snapshot` is the main source of truth. If you want true polling mode, add endpoints like:
-- `GET /api/drivers?room=...`
-- `GET /api/rider/active?room=...&riderId=...`
-- `GET /api/driver/requests?room=...&driverId=...` (auth)
-
-### Dart SSE approach (recommended)
-
-Use `package:http` and parse the streamed response as text lines:
-
-- Open a `http.Request("GET", streamUri)` and `client.send(request)`.
-- Decode bytes with `utf8.decoder`, split by lines.
-- Parse blocks separated by blank lines:
-  - `event: <name>`
-  - `data: <json>`
-- Dispatch by event name (`snapshot`, `request:new`, etc.).
-
-Implementation note:
-- iOS/Android can buffer; keep `proxy_buffering off` in Nginx for `/api/stream`.
-
-## Authentication
-
-### Register user
-
-**POST** `/api/auth/register`
-
-Body:
 ```json
 {
   "name": "John",
@@ -163,115 +34,83 @@ Body:
 }
 ```
 
-Response:
-```json
-{
-  "ok": true,
-  "token": "<bearer-token>",
-  "user": {
-    "id": "<uuid>",
-    "name": "John",
-    "email": "john@email.com",
-    "phone": "233555123456",
-    "role": "driver"
-  },
-  "driver": { "name": "John", "phone": "233555123456" }
-}
-```
+`role` must be `driver` or `rider`.
 
-Common errors:
-- `EMAIL_IN_USE` (409)
-- `PHONE_IN_USE` (409)
-- `INVALID_EMAIL` / `INVALID_PHONE` / `INVALID_ROLE` (400)
-- `WEAK_PASSWORD` (400)
+### Login
 
-### Login user
+`POST /api/auth/login`
 
-**POST** `/api/auth/login`
-
-Body:
 ```json
 {
   "email": "john@email.com",
-  "password": "secret123",
-  "role": "driver"
+  "password": "secret123"
 }
 ```
 
-`role` is optional but recommended so you can enforce expected role in mobile flow.
+Optional: send `role` to enforce expected role.
 
-Response:
+### Get current user
+
+`GET /api/auth/me` (bearer required)
+
+---
+
+## Config + health
+
+### Health
+
+`GET /api/health`
+
+### Config
+
+`GET /api/config`
+
+Includes:
+- `maxPickupMinutes` (default ~20)
+- `assumedSpeedKmh`
+- `maxActiveRequestsPerDriver`
+- `requestTtlMinutes`
+- `driverStaleSeconds`
+- `daysOpen`
+
+---
+
+## Real-time stream (SSE)
+
+`GET /api/stream?room=<room>&role=<driver|rider>&id=<deviceId>[&code=<roomCode>][&token=<driverToken>]`
+
+Notes:
+- Driver stream requires valid driver token.
+- Rider stream does not require token.
+- Events: `snapshot`, `driver:update`, `driver:remove`, `request:new`, `request:update`, `request:remove`, `ping`.
+
+Recommended for Flutter:
+- Use SSE while app is foregrounded.
+- Reconnect with backoff (`1s, 2s, 5s, 10s, 20s`).
+
+---
+
+## Driver APIs (driver token required)
+
+### Go online
+
+`POST /api/driver/start`
+
 ```json
 {
-  "ok": true,
-  "token": "<bearer-token>",
-  "user": {
-    "id": "<uuid>",
-    "name": "John",
-    "email": "john@email.com",
-    "phone": "233555123456",
-    "role": "driver"
-  },
-  "driver": { "name": "John", "phone": "233555123456" }
+  "room": "ewc",
+  "driverId": "<deviceId>",
+  "destination": "Accra Mall",
+  "code": "<optionalRoomCode>"
 }
 ```
 
-Common errors:
-- `AUTH_INVALID_CREDENTIALS` (401)
-- `AUTH_ROLE_MISMATCH` (403)
+`destination` is required.
 
-### Validate session token
+### Send location update
 
-**GET** `/api/auth/me`
+`POST /api/driver/update`
 
-Header:
-- `Authorization: Bearer <token>`
-
-Response:
-```json
-{
-  "ok": true,
-  "user": {
-    "id": "<uuid>",
-    "name": "John",
-    "email": "john@email.com",
-    "phone": "233555123456",
-    "role": "driver"
-  },
-  "driver": { "name": "John", "phone": "233555123456" }
-}
-```
-
-Common errors:
-- `AUTH_REQUIRED` / `AUTH_INVALID` / `AUTH_EXPIRED` (401)
-
-Compatibility aliases still exist for driver-only clients:
-- `POST /api/auth/driver/register`
-- `POST /api/auth/driver/login`
-- `GET /api/auth/driver/me`
-
-## Driver presence + location (requires bearer token)
-
-### Start (go online)
-
-**POST** `/api/driver/start`
-
-Headers:
-- `Authorization: Bearer <token>`
-
-Body:
-```json
-{ "room": "ewc", "driverId": "<deviceId>", "code": "<optionalRoomCode>" }
-```
-
-### Update location
-
-**POST** `/api/driver/update`
-
-Headers:
-- `Authorization: Bearer <token>`
-
-Body:
 ```json
 {
   "room": "ewc",
@@ -281,53 +120,69 @@ Body:
   "accuracyM": 12.3,
   "heading": 90,
   "speedMps": 2.1,
+  "destination": "Accra Mall",
   "code": "<optionalRoomCode>"
 }
 ```
 
-### Stop (go offline)
+`destination` is optional here (used when route changes).
 
-**POST** `/api/driver/stop`
+### Update destination only
 
-Headers:
-- `Authorization: Bearer <token>`
+`POST /api/driver/destination`
 
-Body:
 ```json
-{ "room": "ewc", "driverId": "<deviceId>", "code": "<optionalRoomCode>" }
+{
+  "room": "ewc",
+  "driverId": "<deviceId>",
+  "destination": "Accra Mall",
+  "code": "<optionalRoomCode>"
+}
 ```
 
-## Rider flow
+### Go offline
 
-### Match nearest driver
+`POST /api/driver/stop`
 
-**POST** `/api/ride/match`
-
-Body:
 ```json
-{ "room": "ewc", "lat": 5.6037, "lng": -0.1870, "code": "<optionalRoomCode>" }
+{
+  "room": "ewc",
+  "driverId": "<deviceId>",
+  "code": "<optionalRoomCode>"
+}
 ```
 
-Response:
+---
+
+## Ride APIs
+
+### Match nearest compatible driver
+
+`POST /api/ride/match`
+
 ```json
-{ "ok": true, "driver": { "id": "<driverId>", "name": "John" }, "etaMinutes": 4.3 }
+{
+  "room": "ewc",
+  "lat": 5.6037,
+  "lng": -0.1870,
+  "destination": "Accra Mall",
+  "code": "<optionalRoomCode>"
+}
 ```
 
-Common errors:
-- `NO_DRIVERS` (404)
-- `INVALID_LAT_LNG` (400)
+Returns nearest driver with compatible destination and ETA within server threshold (~20 min by default).
 
 ### Create ride request
 
-**POST** `/api/ride/request`
+`POST /api/ride/request`
 
-Body:
 ```json
 {
   "room": "ewc",
   "riderId": "<deviceId>",
   "name": "Isaac",
   "phone": "233555000111",
+  "destination": "Accra Mall",
   "lat": 5.6037,
   "lng": -0.1870,
   "targetDriverId": "<optionalDriverId>",
@@ -336,19 +191,15 @@ Body:
 }
 ```
 
-Common errors:
-- `NO_DRIVERS` (404) (if auto-match is used)
-- `DRIVER_NOT_FOUND` (404)
-- `DRIVER_AT_CAPACITY` (409)
-- `TOO_FAR` (409)
-- `RIDER_PHONE_RESERVED` (409)
-- `RIDER_PHONE_IN_USE` (409)
+Rules:
+- `destination` is required.
+- If `targetDriverId` is omitted, server auto-picks closest compatible driver.
+- Driver capacity and distance/ETA limits are enforced.
 
-### Cancel ride request
+### Cancel request
 
-**POST** `/api/ride/cancel`
+`POST /api/ride/cancel`
 
-Body:
 ```json
 {
   "room": "ewc",
@@ -358,30 +209,81 @@ Body:
 }
 ```
 
-## Driver handling of ride requests (requires bearer token)
+### Driver accepts request (driver token required)
 
-### Accept request
+`POST /api/ride/accept`
 
-**POST** `/api/ride/accept`
-
-Headers:
-- `Authorization: Bearer <token>`
-
-Body:
 ```json
-{ "room": "ewc", "driverId": "<deviceId>", "requestId": "<requestId>", "code": "<optionalRoomCode>" }
+{
+  "room": "ewc",
+  "driverId": "<deviceId>",
+  "requestId": "<requestId>",
+  "code": "<optionalRoomCode>"
+}
 ```
 
-Response includes the updated request and will include the driver’s contact for the rider.
+### Driver declines request (driver token required)
 
-### Decline request
+`POST /api/ride/decline`
 
-**POST** `/api/ride/decline`
-
-Headers:
-- `Authorization: Bearer <token>`
-
-Body:
 ```json
-{ "room": "ewc", "driverId": "<deviceId>", "requestId": "<requestId>", "code": "<optionalRoomCode>" }
+{
+  "room": "ewc",
+  "driverId": "<deviceId>",
+  "requestId": "<requestId>",
+  "code": "<optionalRoomCode>"
+}
 ```
+
+### Driver completes request (driver token required)
+
+`POST /api/ride/complete`
+
+```json
+{
+  "room": "ewc",
+  "driverId": "<deviceId>",
+  "requestId": "<requestId>",
+  "code": "<optionalRoomCode>"
+}
+```
+
+### Ride history (token required)
+
+`GET /api/ride/history?limit=40`
+
+Returns role-aware history:
+- driver sees rows where their phone is `driver_phone`
+- rider sees rows where their phone is `rider_phone`
+
+---
+
+## Common error codes
+
+- `AUTH_REQUIRED`, `AUTH_INVALID`, `AUTH_EXPIRED`
+- `AUTH_ROLE_MISMATCH`
+- `INVALID_JSON`, `BODY_TOO_LARGE`
+- `MISSING_DRIVER_DESTINATION`
+- `MISSING_RIDER_DESTINATION`
+- `INVALID_LAT_LNG`
+- `NO_DRIVERS`
+- `DRIVER_NOT_FOUND`
+- `DRIVER_AT_CAPACITY`
+- `DRIVER_NO_LOCATION`
+- `TOO_FAR`
+- `DESTINATION_MISMATCH`
+- `RIDER_PHONE_RESERVED`
+- `RIDER_PHONE_IN_USE`
+
+---
+
+## Flutter integration checklist
+
+- Persist `deviceId`, token, and user profile locally.
+- Open SSE after login and role selection in app state.
+- For driver mode:
+  - call `/api/driver/start` once
+  - post `/api/driver/update` every 5–10 seconds while online
+- For rider mode:
+  - set destination before calling `/api/ride/match` or `/api/ride/request`
+- Always reconnect SSE with backoff on disconnect.

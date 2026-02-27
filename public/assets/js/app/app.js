@@ -2,7 +2,7 @@ import { STORAGE_KEYS } from "./constants.js";
 
 const API_BASE = "__API_BASE_URL__";
 import { api } from "./api.js";
-import { addActivity, clearActivity, renderActivity } from "./activity.js";
+import { addActivity, clearActivity } from "./activity.js";
 import {
   clearAuth,
   getAuthMe,
@@ -20,7 +20,7 @@ import { createState } from "./state.js";
 import { initTheme } from "./theme.js";
 import {
   digitsOnly,
-  driverDisplayName,
+  destinationsCompatible,
   escapeHtml,
   etaMinutesFromKm,
   fmtAgeMs,
@@ -31,6 +31,7 @@ import {
   isValidPhoneDigits,
   kmToMi,
   mapsDirectionsUrl,
+  sanitizeDestinationText,
 } from "./utils.js";
 
 const MAPS_ICON_SVG = `
@@ -45,7 +46,9 @@ initTheme({ state, els });
 const sheet = createSheet(state, els);
 const {
   closeSheet,
+  openSheet,
   promptRiderContact,
+  promptDestination,
   promptAuthRegister,
   promptRoleLogin,
 } = sheet;
@@ -81,6 +84,89 @@ function handleGeoChange() {
   renderAll();
 }
 
+function formatHistoryStatus(status) {
+  const s = String(status || "").trim().toLowerCase();
+  if (s === "assigned") return { label: "Accepted", tone: "success" };
+  if (s === "completed") return { label: "Completed", tone: "success" };
+  if (s === "pending") return { label: "Pending", tone: "warning" };
+  if (s === "cancelled") return { label: "Cancelled", tone: "danger" };
+  if (s === "declined") return { label: "Declined", tone: "danger" };
+  if (s === "expired") return { label: "Expired", tone: "warning" };
+  if (s === "driver_offline") return { label: "Driver offline", tone: "warning" };
+  if (s === "stale") return { label: "Closed", tone: "info" };
+  return { label: "Updated", tone: "info" };
+}
+
+async function refreshRideHistory({ silent = true } = {}) {
+  const token = (state.driver.auth.token ?? "").trim();
+  if (!token) {
+    state.history.items = [];
+    return;
+  }
+  state.history.loading = true;
+  try {
+    const result = await api("/api/ride/history?limit=40", {
+      method: "GET",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    state.history.items = Array.isArray(result?.items) ? result.items : [];
+  } catch (e) {
+    if (!silent) {
+      notify({
+        title: "History",
+        body: e?.message || "Could not load history.",
+        tone: "warning",
+      });
+    }
+  } finally {
+    state.history.loading = false;
+  }
+}
+
+function historyEntryItem(entry) {
+  const row = document.createElement("div");
+  const status = formatHistoryStatus(entry?.status);
+  row.className = `item item--activity item--${status.tone}`;
+  const when = fmtAgeMs(Date.now() - Number(entry?.updatedAt || entry?.createdAt || 0));
+  const riderName = escapeHtml(entry?.riderName || "Rider");
+  const driverName = escapeHtml(entry?.driverName || "Driver");
+  const riderDestination = escapeHtml(entry?.riderDestination || "—");
+  const driverDestination = escapeHtml(entry?.driverDestination || "—");
+  const contactPhone =
+    state.role === "driver"
+      ? digitsOnly(entry?.riderPhone || "")
+      : digitsOnly(entry?.driverPhone || "");
+  const callLabel = state.role === "driver" ? `Call ${riderName}` : `Call ${driverName}`;
+  const call = contactPhone ? callButtonHtml(contactPhone, callLabel) : "";
+
+  row.innerHTML = `
+    <div class="activityRow">
+      <div class="activityIcon" aria-hidden="true">${status.label.slice(0, 1)}</div>
+      <div class="activityMain">
+        <div class="activityTop">
+          <div class="activityTitle">
+            <span class="activityTitle__text">${status.label}</span>
+            <span class="activityTitle__when">${escapeHtml(when)}</span>
+          </div>
+          ${call ? `<div class="activityCall">${call}</div>` : ""}
+        </div>
+        <div class="activityDetail">Rider: ${riderName} → ${riderDestination}</div>
+        <div class="activityDetail">Driver: ${driverName} → ${driverDestination}</div>
+      </div>
+    </div>
+  `;
+  return row;
+}
+
+function renderRideHistory() {
+  if (!els.activityList || !els.activityEmpty) return;
+  els.activityList.innerHTML = "";
+  const items = Array.isArray(state.history.items) ? state.history.items : [];
+  for (const item of items) els.activityList.appendChild(historyEntryItem(item));
+  els.activityEmpty.hidden = items.length > 0;
+  els.activityEmpty.textContent = state.history.loading ? "Loading history…" : "No rides yet.";
+}
+
 function setActiveTab(tab) {
   state.ui.activeTab = tab === "activity" ? "activity" : "home";
   els.tabHome.setAttribute("aria-selected", state.ui.activeTab === "home" ? "true" : "false");
@@ -90,7 +176,9 @@ function setActiveTab(tab) {
   );
   els.homeView.hidden = state.ui.activeTab !== "home";
   els.activityView.hidden = state.ui.activeTab !== "activity";
-  if (state.ui.activeTab === "activity") renderActivity(state, els);
+  if (state.ui.activeTab === "activity") {
+    refreshRideHistory().finally(() => renderRideHistory());
+  }
 }
 
 function disconnectStream() {
@@ -252,6 +340,7 @@ function connectStream() {
       });
     }
 
+    refreshRideHistory().catch(() => {});
     updateRequestAlarm();
     renderAll();
   });
@@ -284,6 +373,7 @@ function connectStream() {
       }
     }
 
+    refreshRideHistory().catch(() => {});
     updateRequestAlarm();
     renderAll();
   });
@@ -325,6 +415,7 @@ function connectStream() {
       }
     }
 
+    refreshRideHistory().catch(() => {});
     updateRequestAlarm();
     renderAll();
   });
@@ -358,6 +449,12 @@ function saveAuthState({ token, user }) {
     if (state.driver.auth.role === "driver") localStorage.setItem(STORAGE_KEYS.driverPhone, state.driver.auth.phone);
     if (state.driver.auth.role === "rider") localStorage.setItem(STORAGE_KEYS.riderPhone, state.driver.auth.phone);
   }
+  if (state.driver.auth.role === "driver") {
+    state.driver.destination = (localStorage.getItem(STORAGE_KEYS.driverDestination) ?? "").trim();
+  }
+  if (state.driver.auth.role === "rider") {
+    state.rider.destination = (localStorage.getItem(STORAGE_KEYS.riderDestination) ?? "").trim();
+  }
 }
 
 function resetAuthState() {
@@ -372,7 +469,7 @@ function resetAuthState() {
 function roleLabel(role) {
   if (role === "driver") return "driver";
   if (role === "rider") return "rider";
-  return "another";
+  return "account";
 }
 
 async function ensureRoleAuth(requiredRole, { interactive } = { interactive: false }) {
@@ -407,7 +504,7 @@ async function ensureRoleAuth(requiredRole, { interactive } = { interactive: fal
     const result = await loginUser({
       email: entered.email,
       password: entered.password,
-      role: requiredRole,
+      role: requiredRole || undefined,
     });
     saveAuthState({ token: result.token, user: result.user });
     return true;
@@ -441,17 +538,27 @@ async function ensureRiderAuth({ interactive } = { interactive: false }) {
   return ensureRoleAuth("rider", { interactive });
 }
 
+async function ensureSignedIn({ interactive } = { interactive: false }) {
+  return ensureRoleAuth("", { interactive });
+}
+
 function showRole(role) {
-  state.role = role;
-  localStorage.setItem(STORAGE_KEYS.role, role);
+  const nextRole = role === "driver" ? "driver" : role === "rider" ? "rider" : "";
+  if (!nextRole) return;
+  const changed = state.role !== nextRole;
+  state.role = nextRole;
+  localStorage.setItem(STORAGE_KEYS.role, nextRole);
 
   els.roleCard.hidden = true;
-  els.driverCard.hidden = role !== "driver";
-  els.riderCard.hidden = role !== "rider";
+  els.driverCard.hidden = nextRole !== "driver";
+  els.riderCard.hidden = nextRole !== "rider";
 
-  primeLocation().catch(() => {});
-  startGeoWatch();
-  connectStream();
+  if (changed || !state.eventSource) {
+    primeLocation().catch(() => {});
+    startGeoWatch();
+    connectStream();
+  }
+  refreshRideHistory().catch(() => {});
   renderAll();
 }
 
@@ -462,10 +569,54 @@ async function clearRole() {
   state.role = "";
   localStorage.removeItem(STORAGE_KEYS.role);
   disconnectStream();
+  resetAuthState();
+  state.history.items = [];
   els.roleCard.hidden = false;
   els.driverCard.hidden = true;
   els.riderCard.hidden = true;
   renderAll();
+}
+
+function getProfileLabel() {
+  const name = String(state.driver.auth.name || "").trim();
+  if (name) return name.slice(0, 1).toUpperCase();
+  return "👤";
+}
+
+function renderTopActions() {
+  const signedIn = Boolean(state.driver.auth.token);
+  if (els.btnRegisterDriver) els.btnRegisterDriver.hidden = signedIn;
+  if (els.btnProfile) {
+    els.btnProfile.hidden = !signedIn;
+    els.btnProfile.textContent = getProfileLabel();
+    els.btnProfile.title = signedIn ? state.driver.auth.name || "Profile" : "Profile";
+  }
+}
+
+function openProfileSheet() {
+  const body = document.createElement("div");
+  const role = roleLabel(state.driver.auth.role);
+  const name = escapeHtml(state.driver.auth.name || "Member");
+  const email = escapeHtml(state.driver.auth.email || "—");
+  const phone = escapeHtml(state.driver.auth.phone || "—");
+  const destination =
+    state.role === "driver"
+      ? escapeHtml(state.driver.destination || "Not set")
+      : escapeHtml(state.rider.destination || "Not set");
+  body.innerHTML = `
+    <div class="notice">
+      <div class="notice__title">${name}</div>
+      <div class="notice__text">${escapeHtml(role.toUpperCase())}</div>
+      <div class="notice__text">Email: ${email}</div>
+      <div class="notice__text">Phone: ${phone}</div>
+      <div class="notice__text">Destination: ${destination}</div>
+    </div>
+  `;
+  openSheet({ title: "Profile", body, confirmText: "Close" });
+  state.sheet.onClose = () => {};
+  state.sheet.onConfirm = async () => {
+    closeSheet();
+  };
 }
 
 let lastDriverPostAt = 0;
@@ -487,6 +638,7 @@ async function postDriverLocation() {
       accuracyM: state.geo.last.accuracyM,
       heading: state.geo.last.heading,
       speedMps: state.geo.last.speedMps,
+      destination: state.driver.destination || undefined,
     },
   });
 }
@@ -510,6 +662,16 @@ function startDriverHeartbeat() {
 async function setDriverOnline(online) {
   if (online) {
     if (!(await ensureDriverAuth({ interactive: true }))) throw new Error("CANCELLED");
+    if (!state.driver.destination) {
+      const destination = await promptDestination({
+        title: "Driver destination",
+        hint: "Set where you are going before going online.",
+        storageKey: STORAGE_KEYS.driverDestination,
+      });
+      if (!destination) throw new Error("CANCELLED");
+      state.driver.destination = destination;
+      localStorage.setItem(STORAGE_KEYS.driverDestination, destination);
+    }
 
     await primeAlertAudio().catch(() => {});
     // In-app notifications only (no browser permission prompt).
@@ -527,6 +689,7 @@ async function setDriverOnline(online) {
         room: state.room,
         code: state.roomCode || undefined,
         driverId: state.deviceId,
+        destination: state.driver.destination,
       },
     });
 
@@ -570,8 +733,13 @@ async function requestPickup(targetDriverId, riderContact) {
 
   const riderName = (riderContact?.name ?? "").toString().trim();
   const riderPhone = digitsOnly(riderContact?.phone ?? "");
+  const riderDestination = sanitizeDestinationText(riderContact?.destination ?? state.rider.destination);
   if (!riderName) throw new Error("MISSING_RIDER_NAME");
   if (!isValidPhoneDigits(riderPhone)) throw new Error("INVALID_RIDER_PHONE");
+  if (!riderDestination) throw new Error("MISSING_RIDER_DESTINATION");
+
+  state.rider.destination = riderDestination;
+  localStorage.setItem(STORAGE_KEYS.riderDestination, riderDestination);
 
   const result = await api("/api/ride/request", {
     method: "POST",
@@ -581,6 +749,7 @@ async function requestPickup(targetDriverId, riderContact) {
       riderId: state.deviceId,
       name: riderName,
       phone: riderPhone,
+      destination: riderDestination,
       lat: state.geo.last.lat,
       lng: state.geo.last.lng,
       targetDriverId: targetDriverId || undefined,
@@ -594,6 +763,7 @@ async function requestPickup(targetDriverId, riderContact) {
   state.live.requests.set(req.id, req);
   const label = req.targetDriverName ? `To ${req.targetDriverName}.` : "To nearest driver.";
   addActivity(state, els, "Ride requested", label, "info");
+  refreshRideHistory().catch(() => {});
   renderAll();
 }
 
@@ -615,6 +785,7 @@ async function cancelPickup() {
   state.rider.requestId = "";
   localStorage.removeItem(STORAGE_KEYS.riderRequestId);
   addActivity(state, els, "Ride cancelled", "You cancelled your request.", "danger");
+  refreshRideHistory().catch(() => {});
   renderAll();
 }
 
@@ -646,6 +817,7 @@ async function acceptRequest(req) {
     phoneDigits: updated.riderPhone || "",
     callLabel: `Call ${updated.name || "rider"}`,
   });
+  refreshRideHistory().catch(() => {});
   updateRequestAlarm();
   renderAll();
 }
@@ -667,6 +839,7 @@ async function declineRequest(req) {
     phoneDigits: req.riderPhone || "",
     callLabel: `Call ${req.name || "rider"}`,
   });
+  refreshRideHistory().catch(() => {});
   updateRequestAlarm();
   renderAll();
 }
@@ -696,6 +869,7 @@ function driverRequestItem(req) {
       <div>
         <div class="item__title">${escapeHtml(req.name)}</div>
         <div class="item__meta">${escapeHtml(created)} • ${escapeHtml(distLabel)} away</div>
+        <div class="item__meta">Going to: ${escapeHtml(req.riderDestination || "—")}</div>
       </div>
       <div class="item__side">
         ${call}
@@ -755,25 +929,32 @@ function driverListItem(driver, { showRequest = true, interactive = false } = {}
   el.className = "item";
   const updatedAt = driver.last?.updatedAt ?? 0;
   const age = updatedAt ? fmtAgeMs(Date.now() - updatedAt) : "—";
-  let distLabel = "—";
   let etaLabel = "—";
   let isTooFar = false;
+  const riderDestination = sanitizeDestinationText(state.rider.destination);
+  const driverDestination = sanitizeDestinationText(driver.destination);
+  const destinationOk = destinationsCompatible(driverDestination, riderDestination);
 
   if (state.geo.last && driver.last) {
     const km = haversineKm(state.geo.last.lat, state.geo.last.lng, driver.last.lat, driver.last.lng);
-    const mi = kmToMi(km);
-    distLabel = fmtDistanceMi(mi);
     const speedKmhRaw = Number(state.config?.assumedSpeedKmh);
     const speedKmh = Number.isFinite(speedKmhRaw) ? speedKmhRaw : 40;
     const eta = etaMinutesFromKm(km, speedKmh);
     etaLabel = fmtEtaMinutes(eta);
     const maxMinutesRaw = Number(state.config?.maxPickupMinutes);
-    const maxMinutes = Number.isFinite(maxMinutesRaw) ? maxMinutesRaw : 10;
+    const maxMinutes = Number.isFinite(maxMinutesRaw) ? maxMinutesRaw : 20;
     isTooFar = Number.isFinite(eta) && eta > maxMinutes;
   }
 
   const hasActive = Boolean(getActiveRiderRequest());
-  const disabled = state.rider.locked || hasActive || !state.geo.last || !driver.last || isTooFar;
+  const disabled =
+    state.rider.locked
+    || hasActive
+    || !state.geo.last
+    || !driver.last
+    || isTooFar
+    || !destinationOk
+    || !riderDestination;
 
   if (interactive) {
     el.classList.add("item--clickable");
@@ -787,9 +968,8 @@ function driverListItem(driver, { showRequest = true, interactive = false } = {}
     <div class="item__top">
       <div>
         <div class="item__title">${escapeHtml(driver.name)}</div>
-        <div class="item__meta">${escapeHtml(etaLabel)} away • updated ${escapeHtml(
-          age,
-        )}</div>
+        <div class="item__meta">${escapeHtml(etaLabel)} away • updated ${escapeHtml(age)}</div>
+        <div class="item__meta">Route: ${escapeHtml(driverDestination || "Not set")}</div>
       </div>
       <div class="badge badge--online"><span class="dot dot--online"></span>Online</div>
     </div>
@@ -797,7 +977,13 @@ function driverListItem(driver, { showRequest = true, interactive = false } = {}
       showRequest
         ? `<div class="item__actions">
             <button class="btn btn--primary" data-action="request" ${disabled ? "disabled" : ""}>${
-              isTooFar ? "Too far" : "Request pickup"
+              !riderDestination
+                ? "Set destination first"
+                : !destinationOk
+                  ? "Different route"
+                  : isTooFar
+                    ? "Too far"
+                    : "Request pickup"
             }</button>
           </div>`
         : ""
@@ -812,15 +998,23 @@ function driverListItem(driver, { showRequest = true, interactive = false } = {}
       try {
         const contact = await promptRiderContact(driver.name);
         if (!contact) return;
-        await requestPickup(driver.id, { name: contact.name, phone: contact.phone });
+        await requestPickup(driver.id, {
+          name: contact.name,
+          phone: contact.phone,
+          destination: contact.destination,
+        });
       } catch (e) {
         const maxMinutesRaw = Number(state.config?.maxPickupMinutes);
-        const maxMinutes = Number.isFinite(maxMinutesRaw) ? maxMinutesRaw : 10;
+        const maxMinutes = Number.isFinite(maxMinutesRaw) ? maxMinutesRaw : 20;
         const msg =
           e.message === "RIDER_LOCKED"
             ? "This request was already accepted. Reload the page to start a new request."
             : e.message === "LOCATION_REQUIRED"
               ? "Enable location to request a ride."
+              : e.message === "MISSING_RIDER_DESTINATION"
+                ? "Set where you are going before requesting."
+                : e.message === "DESTINATION_MISMATCH"
+                  ? "This driver is not heading in your direction."
               : e.message === "DRIVER_AT_CAPACITY"
                 ? `This driver already has ${(e.data && e.data.capacity) || 3} requests. Please pick another driver.`
                 : e.message === "TOO_FAR"
@@ -858,6 +1052,10 @@ function driverListItem(driver, { showRequest = true, interactive = false } = {}
 function renderDriverView() {
   if (state.role !== "driver") return;
 
+  const destination = sanitizeDestinationText(state.driver.destination);
+  if (els.driverDestinationText) {
+    els.driverDestinationText.textContent = destination ? `Going to: ${destination}` : "Destination not set.";
+  }
   els.driverStatePill.textContent = state.driver.online ? "Online" : "Offline";
   els.driverStatePill.classList.toggle("pill--online", state.driver.online);
   els.btnDriverToggle.textContent = state.driver.online ? "Go Offline" : "Go Online";
@@ -876,6 +1074,10 @@ function renderDriverView() {
 
 function renderRiderView() {
   if (state.role !== "rider") return;
+  const destination = sanitizeDestinationText(state.rider.destination);
+  if (els.riderDestinationText) {
+    els.riderDestinationText.textContent = destination ? `Going to: ${destination}` : "Destination not set.";
+  }
 
   const active = getActiveRiderRequest();
   if (active) {
@@ -896,6 +1098,7 @@ function renderRiderView() {
         <div class="notice__text">Sent to <strong>${escapeHtml(
           active.targetDriverName || "driver",
         )}</strong>${escapeHtml(closestTag)}</div>
+        <div class="notice__text">Route: ${escapeHtml(active.riderDestination || state.rider.destination || "—")}</div>
         <div class="notice__text">Waiting for driver to accept…</div>
         <div class="notice__text">Expires in ~${escapeHtml(remainingMin)} min</div>
       `;
@@ -1014,18 +1217,32 @@ function renderRiderView() {
     return;
   }
 
+  if (!destination) {
+    if (els.driversSectionTitle) els.driversSectionTitle.hidden = false;
+    if (els.driversList) els.driversList.innerHTML = "";
+    if (els.driversEmpty) {
+      els.driversEmpty.textContent = "Set your destination to view matching drivers.";
+      els.driversEmpty.hidden = false;
+    }
+    return;
+  }
+
   if (els.driversSectionTitle) els.driversSectionTitle.hidden = false;
 
   const speedKmhRaw = Number(state.config?.assumedSpeedKmh);
   const speedKmh = Number.isFinite(speedKmhRaw) ? speedKmhRaw : 40;
+  const maxMinutesRaw = Number(state.config?.maxPickupMinutes);
+  const maxMinutes = Number.isFinite(maxMinutesRaw) ? maxMinutesRaw : 20;
 
   const drivers = Array.from(state.live.drivers.values())
     .filter((d) => d.last)
     .map((d) => {
       const km = haversineKm(state.geo.last.lat, state.geo.last.lng, d.last.lat, d.last.lng);
       const eta = etaMinutesFromKm(km, speedKmh);
-      return { driver: d, eta };
+      return { driver: d, eta, compatible: destinationsCompatible(d.destination, destination) };
     })
+    .filter((row) => row.compatible)
+    .filter((row) => Number.isFinite(row.eta) && row.eta <= maxMinutes)
     .sort((a, b) => {
       const aEta = Number.isFinite(a.eta) ? a.eta : Number.POSITIVE_INFINITY;
       const bEta = Number.isFinite(b.eta) ? b.eta : Number.POSITIVE_INFINITY;
@@ -1048,8 +1265,18 @@ function renderRiderView() {
 }
 
 function renderAll() {
-  setActiveTab(state.ui.activeTab);
-  if (state.ui.activeTab === "activity") return;
+  renderTopActions();
+  els.tabHome.setAttribute("aria-selected", state.ui.activeTab === "home" ? "true" : "false");
+  els.tabActivity.setAttribute(
+    "aria-selected",
+    state.ui.activeTab === "activity" ? "true" : "false",
+  );
+  els.homeView.hidden = state.ui.activeTab !== "home";
+  els.activityView.hidden = state.ui.activeTab !== "activity";
+  if (state.ui.activeTab === "activity") {
+    renderRideHistory();
+    return;
+  }
 
   setLocationText();
   els.locationCard.hidden = Boolean(state.geo.last);
@@ -1096,7 +1323,7 @@ function initEvents() {
   });
 
   els.btnClearActivity.addEventListener("click", () => {
-    clearActivity(state, els);
+    refreshRideHistory({ silent: false }).finally(() => renderRideHistory());
   });
 
   els.sheetOverlay.addEventListener("click", closeSheet);
@@ -1124,49 +1351,7 @@ function initEvents() {
     }
   });
 
-  els.btnRoleDriver.addEventListener("click", async () => {
-    els.btnRoleDriver.disabled = true;
-    try {
-      const ok = await ensureDriverAuth({ interactive: true });
-      if (!ok) return;
-      showRole("driver");
-      // After successful driver login, go online automatically.
-      try {
-        await setDriverOnline(true);
-      } catch (e) {
-        if (e?.message === "CANCELLED") return;
-        if (e?.message === "LOCATION_REQUIRED") {
-          notify({
-            title: "Location needed",
-            body: "Enable location to go online as a driver.",
-            tone: "warning",
-            durationMs: 6000,
-          });
-          return;
-        }
-        notify({
-          title: "Could not go online",
-          body: String(e?.message || e),
-          tone: "danger",
-          durationMs: 6000,
-        });
-      }
-    } finally {
-      els.btnRoleDriver.disabled = false;
-    }
-  });
-  els.btnRoleRider.addEventListener("click", async () => {
-    els.btnRoleRider.disabled = true;
-    try {
-      const ok = await ensureRiderAuth({ interactive: true });
-      if (!ok) return;
-      showRole("rider");
-    } finally {
-      els.btnRoleRider.disabled = false;
-    }
-  });
-  els.btnRegisterDriver.addEventListener("click", async () => {
-    els.btnRegisterDriver.disabled = true;
+  const runRegistrationFlow = async () => {
     try {
       const entered = await promptAuthRegister();
       if (!entered) return;
@@ -1182,13 +1367,11 @@ function initEvents() {
 
       notify({
         title: "Registration successful",
-        body:
-          entered.role === "driver"
-            ? "You can now tap “I’m a Driver”."
-            : "You can now tap “I Need a Ride”.",
+        body: `Signed in as ${entered.role}.`,
         tone: "success",
         durationMs: 4500,
       });
+      showRole(reg?.user?.role || entered.role);
       renderAll();
     } catch (e) {
       const msg =
@@ -1202,12 +1385,74 @@ function initEvents() {
                 ? "Choose whether this account is for driver or rider."
                 : e.message;
       notify({ title: "Register", body: msg, tone: "danger", durationMs: 6000 });
+    }
+  };
+
+  els.btnRoleDriver.addEventListener("click", async () => {
+    els.btnRoleDriver.disabled = true;
+    try {
+      const ok = await ensureSignedIn({ interactive: true });
+      if (!ok) return;
+      showRole(state.driver.auth.role);
+    } finally {
+      els.btnRoleDriver.disabled = false;
+    }
+  });
+
+  els.btnRoleRider.addEventListener("click", async () => {
+    els.btnRoleRider.disabled = true;
+    try {
+      await runRegistrationFlow();
+    } finally {
+      els.btnRoleRider.disabled = false;
+    }
+  });
+
+  els.btnRegisterDriver.addEventListener("click", async () => {
+    els.btnRegisterDriver.disabled = true;
+    try {
+      await runRegistrationFlow();
     } finally {
       els.btnRegisterDriver.disabled = false;
     }
   });
+  els.btnProfile?.addEventListener("click", openProfileSheet);
   els.btnSwitchToRider.addEventListener("click", clearRole);
   els.btnSwitchToDriver.addEventListener("click", clearRole);
+  els.btnDriverDestination?.addEventListener("click", async () => {
+    const destination = await promptDestination({
+      title: "Driver destination",
+      hint: "Set where you are going so riders on the same route can find you.",
+      storageKey: STORAGE_KEYS.driverDestination,
+    });
+    if (!destination) return;
+    state.driver.destination = destination;
+    localStorage.setItem(STORAGE_KEYS.driverDestination, destination);
+    if (state.driver.online) {
+      await api("/api/driver/destination", {
+        method: "POST",
+        headers: authHeaders(),
+        body: {
+          room: state.room,
+          code: state.roomCode || undefined,
+          driverId: state.deviceId,
+          destination,
+        },
+      }).catch(() => {});
+    }
+    renderAll();
+  });
+  els.btnRiderDestination?.addEventListener("click", async () => {
+    const destination = await promptDestination({
+      title: "Ride destination",
+      hint: "Set where you are going so we can suggest matching drivers.",
+      storageKey: STORAGE_KEYS.riderDestination,
+    });
+    if (!destination) return;
+    state.rider.destination = destination;
+    localStorage.setItem(STORAGE_KEYS.riderDestination, destination);
+    renderAll();
+  });
 
   els.btnReset.addEventListener("click", () => {
     hardReload().catch(() => {
@@ -1222,7 +1467,12 @@ function initEvents() {
       await setDriverOnline(!state.driver.online);
     } catch (e) {
       if (e.message === "CANCELLED") return;
-      const msg = e.message === "LOCATION_REQUIRED" ? "Enable location to go online." : e.message;
+      const msg =
+        e.message === "LOCATION_REQUIRED"
+          ? "Enable location to go online."
+          : e.message === "MISSING_DRIVER_DESTINATION"
+            ? "Set where you are going before going online."
+            : e.message;
       notify({ title: "Driver", body: msg, tone: "danger", durationMs: 5000 });
     } finally {
       els.btnDriverToggle.disabled = false;
@@ -1247,7 +1497,12 @@ function initEvents() {
       const existing = getActiveRiderRequest();
       if (existing) return;
 
-      showRiderLoader({ title: "Requesting a ride", message: "Finding the nearest driver…" });
+      const contact = await promptRiderContact();
+      if (!contact) return;
+      state.rider.destination = sanitizeDestinationText(contact.destination);
+      localStorage.setItem(STORAGE_KEYS.riderDestination, state.rider.destination);
+
+      showRiderLoader({ title: "Requesting a ride", message: "Finding the nearest matching driver…" });
 
       if (!state.geo.last) await primeLocation();
       if (!state.geo.last) throw new Error("LOCATION_REQUIRED");
@@ -1259,6 +1514,7 @@ function initEvents() {
           code: state.roomCode || undefined,
           lat: state.geo.last.lat,
           lng: state.geo.last.lng,
+          destination: contact.destination,
         },
       });
 
@@ -1266,23 +1522,29 @@ function initEvents() {
       if (!driver?.id) throw new Error("NO_DRIVERS");
 
       showRiderLoader({ title: "Driver found", message: `Connecting you to ${driver.name || "a driver"}…` });
-      const contact = await promptRiderContact(driver.name || "driver");
-      if (!contact) return;
 
       showRiderLoader({ title: "Sending request", message: "Just a moment…" });
-      await requestPickup(driver.id, { name: contact.name, phone: contact.phone });
+      await requestPickup(driver.id, {
+        name: contact.name,
+        phone: contact.phone,
+        destination: contact.destination,
+      });
     } catch (e) {
       const maxMinutesRaw = Number(state.config?.maxPickupMinutes);
-      const maxMinutes = Number.isFinite(maxMinutesRaw) ? maxMinutesRaw : 10;
+      const maxMinutes = Number.isFinite(maxMinutesRaw) ? maxMinutesRaw : 20;
       const msg =
         e.message === "RIDER_LOCKED"
           ? "This request was already accepted. Reload the page to start a new request."
           : e.message === "LOCATION_REQUIRED"
             ? "Enable location to request a ride."
+            : e.message === "MISSING_RIDER_DESTINATION"
+              ? "Set where you are going first."
             : e.message === "NO_DRIVERS"
-              ? "No available drivers right now."
+              ? "No nearby drivers on your route right now."
               : e.message === "TOO_FAR"
                 ? `No drivers within ${maxMinutes} minutes right now.`
+                : e.message === "DESTINATION_MISMATCH"
+                  ? "No drivers heading your way right now."
                 : e.message === "RIDER_PHONE_RESERVED"
                   ? "That phone number belongs to an active driver right now. You can call them, but enter your own number for your request."
                   : e.message === "RIDER_PHONE_IN_USE"
@@ -1313,31 +1575,22 @@ async function init() {
   await api("/api/config")
     .then((cfg) => {
       state.config = cfg;
-      if (els.daysHint) els.daysHint.textContent = `Most active: ${cfg.daysOpen.join(" • ")}.`;
+      if (els.daysHint) {
+        els.daysHint.textContent = `Sign in once. Most active: ${cfg.daysOpen.join(" • ")}.`;
+      }
     })
     .catch(() => {});
 
   await primeLocation();
 
-  if (state.role === "driver") {
-    const ok = await ensureDriverAuth({ interactive: false });
-    if (!ok) {
-      state.role = "";
-      localStorage.removeItem(STORAGE_KEYS.role);
-    }
-  }
-  if (state.role === "rider") {
-    const ok = await ensureRiderAuth({ interactive: false });
-    if (!ok) {
-      state.role = "";
-      localStorage.removeItem(STORAGE_KEYS.role);
-    }
-  }
-
-  if (state.role === "driver" || state.role === "rider") {
+  const hasSession = await ensureSignedIn({ interactive: false });
+  if (hasSession) {
+    showRole(state.driver.auth.role);
     els.roleCard.hidden = true;
-    startGeoWatch();
-    connectStream();
+    refreshRideHistory().catch(() => {});
+  } else {
+    state.role = "";
+    localStorage.removeItem(STORAGE_KEYS.role);
   }
 
   state.ui.refreshTimer = setInterval(() => {

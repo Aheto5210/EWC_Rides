@@ -13,6 +13,8 @@ export const STORAGE_KEYS = {
   authEmail: "ewc.auth.email",
   authPhone: "ewc.auth.phone",
   authName: "ewc.auth.name",
+  driverDestination: "ewc.driver.destination",
+  riderDestination: "ewc.rider.destination",
   riderRequestId: "ewc.rider.requestId",
   activity: "ewc.activity",
 };

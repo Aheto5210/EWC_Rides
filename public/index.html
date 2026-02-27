@@ -35,6 +35,16 @@
           <button id="btnRegisterDriver" class="btn btn--accent btn--sm" type="button">
             Register
           </button>
+          <button
+            id="btnProfile"
+            class="iconBtn"
+            type="button"
+            aria-label="Profile"
+            title="Profile"
+            hidden
+          >
+            👤
+          </button>
           <button id="btnTheme" class="iconBtn" type="button" aria-label="Toggle theme">
             ☾
           </button>
@@ -62,28 +72,29 @@
         </section>
 
         <section class="card" id="roleCard">
-          <div class="card__title">Choose your role</div>
+          <div class="card__title">Welcome</div>
           <div class="stack">
-            <button
-              id="btnRoleDriver"
-              class="btn btn--primary btn--xl"
-              type="button"
-            >
-              I’m a Driver
+            <button id="btnRoleDriver" class="btn btn--primary btn--xl" type="button">
+              Sign In
             </button>
             <button id="btnRoleRider" class="btn btn--xl" type="button">
-              I Need a Ride
+              Create Account
             </button>
           </div>
-          <div id="daysHint" class="muted"></div>
+          <div id="daysHint" class="muted">Sign in once. Your role is detected automatically.</div>
         </section>
 
         <section class="card" id="driverCard" hidden>
           <div class="card__top">
             <div class="card__title">Driver</div>
             <button id="btnSwitchToRider" class="btn btn--ghost" type="button">
-              Switch
+              Sign Out
             </button>
+          </div>
+
+          <div class="row row--between">
+            <div id="driverDestinationText" class="muted">Destination not set.</div>
+            <button id="btnDriverDestination" class="btn btn--ghost" type="button">Set Destination</button>
           </div>
 
           <div class="row row--between">
@@ -105,8 +116,13 @@
           <div class="card__top">
             <div class="card__title">Need a ride</div>
             <button id="btnSwitchToDriver" class="btn btn--ghost" type="button">
-              Switch
+              Sign Out
             </button>
+          </div>
+
+          <div class="row row--between">
+            <div id="riderDestinationText" class="muted">Destination not set.</div>
+            <button id="btnRiderDestination" class="btn btn--ghost" type="button">Set Destination</button>
           </div>
 
           <div id="riderActive" class="notice" hidden></div>
@@ -133,7 +149,7 @@
           <div class="card__top">
             <div class="card__title">Activity</div>
             <button id="btnClearActivity" class="btn btn--ghost" type="button">
-              Clear
+              Refresh
             </button>
           </div>
           <div id="activityList" class="list"></div>

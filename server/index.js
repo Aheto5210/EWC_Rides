@@ -23,7 +23,7 @@ const DRIVER_SESSION_TTL_MS =
   60 *
   1_000;
 const MAX_PICKUP_MINUTES = clampNumber(
-  Number(process.env.MAX_PICKUP_MINUTES ?? 10),
+  Number(process.env.MAX_PICKUP_MINUTES ?? 20),
   1,
   60,
 );
@@ -229,6 +229,44 @@ function sanitizeName(name) {
   return trimmed.slice(0, 32);
 }
 
+function sanitizeDestination(destination) {
+  const trimmed = (destination ?? "").toString().trim();
+  if (!trimmed) return "";
+  return trimmed.slice(0, 80);
+}
+
+function destinationKey(value) {
+  return sanitizeDestination(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function destinationTokens(value) {
+  return destinationKey(value)
+    .split(" ")
+    .map((v) => v.trim())
+    .filter(Boolean);
+}
+
+function isDestinationCompatible(driverDestination, riderDestination) {
+  const driverKey = destinationKey(driverDestination);
+  const riderKey = destinationKey(riderDestination);
+  if (!driverKey || !riderKey) return false;
+  if (driverKey === riderKey) return true;
+  if (driverKey.includes(riderKey) || riderKey.includes(driverKey)) return true;
+
+  const driverSet = new Set(destinationTokens(driverKey));
+  const riderSet = new Set(destinationTokens(riderKey));
+  if (!driverSet.size || !riderSet.size) return false;
+  let overlap = 0;
+  for (const token of riderSet) if (driverSet.has(token)) overlap += 1;
+  if (!overlap) return false;
+  const threshold = Math.max(1, Math.ceil(Math.min(driverSet.size, riderSet.size) / 2));
+  return overlap >= threshold;
+}
+
 function sanitizeEmail(email) {
   const trimmed = (email ?? "").toString().trim().toLowerCase();
   return trimmed.slice(0, 120);
@@ -331,6 +369,7 @@ db.exec(`
     driver_id TEXT NOT NULL,
     name TEXT NOT NULL,
     phone TEXT,
+    destination TEXT,
     lat REAL,
     lng REAL,
     accuracy_m REAL,
@@ -347,6 +386,8 @@ try {
   const cols = db.prepare("PRAGMA table_info(online_drivers)").all();
   const hasPhone = Array.isArray(cols) && cols.some((c) => String(c?.name) === "phone");
   if (!hasPhone) db.exec("ALTER TABLE online_drivers ADD COLUMN phone TEXT;");
+  const hasDestination = Array.isArray(cols) && cols.some((c) => String(c?.name) === "destination");
+  if (!hasDestination) db.exec("ALTER TABLE online_drivers ADD COLUMN destination TEXT;");
 } catch {
   // ignore
 }
@@ -358,6 +399,7 @@ db.exec(`
     rider_id TEXT NOT NULL,
     name TEXT NOT NULL,
     rider_phone TEXT,
+    rider_destination TEXT,
     note TEXT,
     status TEXT NOT NULL,
     lat REAL NOT NULL,
@@ -365,9 +407,43 @@ db.exec(`
     created_at INTEGER NOT NULL,
     target_driver_id TEXT,
     target_driver_name TEXT,
+    target_driver_destination TEXT,
     assigned_driver_id TEXT,
     assigned_driver_name TEXT,
     assigned_driver_phone TEXT
+  );
+`);
+
+// Backfill schema for older ride_requests table.
+try {
+  const cols = db.prepare("PRAGMA table_info(ride_requests)").all();
+  const hasRiderDestination = Array.isArray(cols)
+    && cols.some((c) => String(c?.name) === "rider_destination");
+  if (!hasRiderDestination) db.exec("ALTER TABLE ride_requests ADD COLUMN rider_destination TEXT;");
+  const hasTargetDestination = Array.isArray(cols)
+    && cols.some((c) => String(c?.name) === "target_driver_destination");
+  if (!hasTargetDestination) {
+    db.exec("ALTER TABLE ride_requests ADD COLUMN target_driver_destination TEXT;");
+  }
+} catch {
+  // ignore
+}
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS ride_history (
+    request_id TEXT PRIMARY KEY,
+    room TEXT NOT NULL,
+    rider_name TEXT,
+    rider_phone TEXT,
+    rider_destination TEXT,
+    driver_name TEXT,
+    driver_phone TEXT,
+    driver_destination TEXT,
+    pickup_lat REAL,
+    pickup_lng REAL,
+    status TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
   );
 `);
 
@@ -383,6 +459,8 @@ db.exec(
 );
 db.exec("CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);");
 db.exec("CREATE INDEX IF NOT EXISTS idx_users_phone ON users(phone);");
+db.exec("CREATE INDEX IF NOT EXISTS idx_ride_history_rider_phone_updated ON ride_history(rider_phone, updated_at);");
+db.exec("CREATE INDEX IF NOT EXISTS idx_ride_history_driver_phone_updated ON ride_history(driver_phone, updated_at);");
 
 function dbGetUserByEmail(email) {
   return (
@@ -446,6 +524,7 @@ function dbUpsertOnlineDriver({
   driverId,
   name,
   phone = "",
+  destination = "",
   lat = null,
   lng = null,
   accuracyM = null,
@@ -457,11 +536,12 @@ function dbUpsertOnlineDriver({
   db.prepare(
     `
     INSERT INTO online_drivers
-      (room, driver_id, name, phone, lat, lng, accuracy_m, heading, speed_mps, updated_at, last_broadcast_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (room, driver_id, name, phone, destination, lat, lng, accuracy_m, heading, speed_mps, updated_at, last_broadcast_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(room, driver_id) DO UPDATE SET
       name = excluded.name,
       phone = excluded.phone,
+      destination = excluded.destination,
       lat = excluded.lat,
       lng = excluded.lng,
       accuracy_m = excluded.accuracy_m,
@@ -475,6 +555,7 @@ function dbUpsertOnlineDriver({
     driverId,
     name,
     phone,
+    destination,
     lat,
     lng,
     accuracyM,
@@ -493,13 +574,15 @@ function dbUpsertRideRequest(room, req) {
   db.prepare(
     `
     INSERT INTO ride_requests
-      (id, room, rider_id, name, rider_phone, note, status, lat, lng, created_at,
-       target_driver_id, target_driver_name, assigned_driver_id, assigned_driver_name, assigned_driver_phone)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (id, room, rider_id, name, rider_phone, rider_destination, note, status, lat, lng, created_at,
+       target_driver_id, target_driver_name, target_driver_destination, assigned_driver_id, assigned_driver_name, assigned_driver_phone)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
+      rider_destination = excluded.rider_destination,
       status = excluded.status,
       target_driver_id = excluded.target_driver_id,
       target_driver_name = excluded.target_driver_name,
+      target_driver_destination = excluded.target_driver_destination,
       assigned_driver_id = excluded.assigned_driver_id,
       assigned_driver_name = excluded.assigned_driver_name,
       assigned_driver_phone = excluded.assigned_driver_phone
@@ -510,6 +593,7 @@ function dbUpsertRideRequest(room, req) {
     req.riderId,
     req.name,
     req.riderPhone ?? "",
+    req.riderDestination ?? "",
     req.note ?? "",
     req.status,
     req.lat,
@@ -517,6 +601,7 @@ function dbUpsertRideRequest(room, req) {
     req.createdAt,
     req.targetDriverId ?? null,
     req.targetDriverName ?? null,
+    req.targetDriverDestination ?? "",
     req.assignedDriverId ?? null,
     req.assignedDriverName ?? null,
     req.assignedDriverPhone ?? "",
@@ -527,11 +612,125 @@ function dbDeleteRideRequest(id) {
   db.prepare("DELETE FROM ride_requests WHERE id = ?").run(id);
 }
 
+function dbUpsertRideHistory({
+  requestId,
+  room,
+  riderName = "",
+  riderPhone = "",
+  riderDestination = "",
+  driverName = "",
+  driverPhone = "",
+  driverDestination = "",
+  pickupLat = null,
+  pickupLng = null,
+  status = "pending",
+  createdAt,
+  updatedAt,
+}) {
+  const now = nowMs();
+  const created = Number.isFinite(Number(createdAt)) ? Number(createdAt) : now;
+  const updated = Number.isFinite(Number(updatedAt)) ? Number(updatedAt) : now;
+  db.prepare(
+    `
+    INSERT INTO ride_history
+      (request_id, room, rider_name, rider_phone, rider_destination, driver_name, driver_phone,
+       driver_destination, pickup_lat, pickup_lng, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(request_id) DO UPDATE SET
+      rider_name = excluded.rider_name,
+      rider_phone = excluded.rider_phone,
+      rider_destination = excluded.rider_destination,
+      driver_name = excluded.driver_name,
+      driver_phone = excluded.driver_phone,
+      driver_destination = excluded.driver_destination,
+      pickup_lat = excluded.pickup_lat,
+      pickup_lng = excluded.pickup_lng,
+      status = excluded.status,
+      updated_at = excluded.updated_at
+  `,
+  ).run(
+    requestId,
+    room,
+    riderName,
+    riderPhone,
+    riderDestination,
+    driverName,
+    driverPhone,
+    driverDestination,
+    pickupLat,
+    pickupLng,
+    status,
+    created,
+    updated,
+  );
+}
+
+function dbGetRideHistoryByPhone(phone, role, limit = 40) {
+  const safeLimit = clampNumber(Number(limit), 1, 100);
+  const p = sanitizePhone(phone);
+  if (!p || !isValidRole(role)) return [];
+  const clause = role === "driver" ? "driver_phone = ?" : "rider_phone = ?";
+  return db
+    .prepare(
+      `SELECT request_id AS requestId, room, rider_name AS riderName, rider_phone AS riderPhone,
+              rider_destination AS riderDestination, driver_name AS driverName,
+              driver_phone AS driverPhone, driver_destination AS driverDestination,
+              pickup_lat AS pickupLat, pickup_lng AS pickupLng, status, created_at AS createdAt, updated_at AS updatedAt
+       FROM ride_history
+       WHERE ${clause}
+       ORDER BY updated_at DESC
+       LIMIT ?`,
+    )
+    .all(p, safeLimit);
+}
+
+function hydrateDriverDestinations(roomState, request) {
+  const targetDriver = request?.targetDriverId ? roomState.drivers.get(request.targetDriverId) : null;
+  const assignedDriver = request?.assignedDriverId ? roomState.drivers.get(request.assignedDriverId) : null;
+  return {
+    targetDriver,
+    assignedDriver,
+    driverName: sanitizeName(
+      request?.assignedDriverName
+        || request?.targetDriverName
+        || assignedDriver?.name
+        || targetDriver?.name,
+    ),
+    driverPhone: sanitizePhone(
+      request?.assignedDriverPhone || assignedDriver?.phone || targetDriver?.phone,
+    ),
+    driverDestination: sanitizeDestination(
+      request?.targetDriverDestination || assignedDriver?.destination || targetDriver?.destination,
+    ),
+  };
+}
+
+function upsertRideHistoryFromRequest(roomState, room, request, status = null) {
+  if (!request?.id) return;
+  const resolvedStatus = String(status || request.status || "pending");
+  const driverCtx = hydrateDriverDestinations(roomState, request);
+  dbUpsertRideHistory({
+    requestId: request.id,
+    room,
+    riderName: sanitizeName(request.name),
+    riderPhone: sanitizePhone(request.riderPhone),
+    riderDestination: sanitizeDestination(request.riderDestination),
+    driverName: driverCtx.driverName,
+    driverPhone: driverCtx.driverPhone,
+    driverDestination: driverCtx.driverDestination,
+    pickupLat: Number(request.lat),
+    pickupLng: Number(request.lng),
+    status: resolvedStatus,
+    createdAt: Number(request.createdAt || nowMs()),
+    updatedAt: nowMs(),
+  });
+}
+
 function hydratePersistedState() {
   const now = nowMs();
   const drivers = db
     .prepare(
-      "SELECT room, driver_id AS driverId, name, phone, lat, lng, accuracy_m AS accuracyM, heading, speed_mps AS speedMps, updated_at AS updatedAt, last_broadcast_at AS lastBroadcastAt FROM online_drivers",
+      "SELECT room, driver_id AS driverId, name, phone, destination, lat, lng, accuracy_m AS accuracyM, heading, speed_mps AS speedMps, updated_at AS updatedAt, last_broadcast_at AS lastBroadcastAt FROM online_drivers",
     )
     .all();
   for (const d of drivers) {
@@ -542,6 +741,7 @@ function hydratePersistedState() {
       id: d.driverId,
       name: sanitizeName(d.name),
       phone: sanitizePhone(d.phone),
+      destination: sanitizeDestination(d.destination),
       available: true,
       last: Number.isFinite(Number(d.lat)) && Number.isFinite(Number(d.lng))
         ? {
@@ -560,7 +760,7 @@ function hydratePersistedState() {
 
   const reqs = db
     .prepare(
-      "SELECT id, room, rider_id AS riderId, name, rider_phone AS riderPhone, note, status, lat, lng, created_at AS createdAt, target_driver_id AS targetDriverId, target_driver_name AS targetDriverName, assigned_driver_id AS assignedDriverId, assigned_driver_name AS assignedDriverName, assigned_driver_phone AS assignedDriverPhone FROM ride_requests",
+      "SELECT id, room, rider_id AS riderId, name, rider_phone AS riderPhone, rider_destination AS riderDestination, note, status, lat, lng, created_at AS createdAt, target_driver_id AS targetDriverId, target_driver_name AS targetDriverName, target_driver_destination AS targetDriverDestination, assigned_driver_id AS assignedDriverId, assigned_driver_name AS assignedDriverName, assigned_driver_phone AS assignedDriverPhone FROM ride_requests",
     )
     .all();
   for (const r of reqs) {
@@ -580,6 +780,7 @@ function hydratePersistedState() {
       riderId: String(r.riderId),
       name: sanitizeName(r.name),
       riderPhone: sanitizePhone(r.riderPhone),
+      riderDestination: sanitizeDestination(r.riderDestination),
       note: String(r.note ?? ""),
       status: String(r.status),
       lat: Number(r.lat),
@@ -587,6 +788,7 @@ function hydratePersistedState() {
       createdAt,
       targetDriverId: r.targetDriverId ? String(r.targetDriverId) : null,
       targetDriverName: r.targetDriverName ? String(r.targetDriverName) : null,
+      targetDriverDestination: sanitizeDestination(r.targetDriverDestination),
       assignedDriverId: r.assignedDriverId ? String(r.assignedDriverId) : null,
       assignedDriverName: r.assignedDriverName ? String(r.assignedDriverName) : null,
       assignedDriverPhone: sanitizePhone(r.assignedDriverPhone),
@@ -778,6 +980,7 @@ function publicDriver(driver) {
   return {
     id: driver.id,
     name: driver.name,
+    destination: sanitizeDestination(driver.destination),
     last: driver.last
       ? {
           lat: driver.last.lat,
@@ -797,6 +1000,7 @@ function publicRequest(request) {
     riderId: request.riderId,
     name: request.name,
     riderPhone: request.riderPhone ?? "",
+    riderDestination: request.riderDestination ?? "",
     note: request.note ?? "",
     status: request.status,
     lat: request.lat,
@@ -804,6 +1008,7 @@ function publicRequest(request) {
     createdAt: request.createdAt,
     targetDriverId: request.targetDriverId ?? null,
     targetDriverName: request.targetDriverName ?? null,
+    targetDriverDestination: request.targetDriverDestination ?? "",
     assignedDriverId: request.assignedDriverId ?? null,
     assignedDriverName: request.assignedDriverName ?? null,
     assignedDriverPhone: request.assignedDriverPhone ?? "",
@@ -867,17 +1072,21 @@ function isRegisteredDriverOnlineInRoom(roomState, phoneDigits) {
   return false;
 }
 
-function pickBestDriver(roomState, riderLat, riderLng) {
+function pickBestDriver(roomState, riderLat, riderLng, riderDestination) {
+  const riderDest = sanitizeDestination(riderDestination);
+  if (!riderDest) return null;
   let best = null;
   for (const d of roomState.drivers.values()) {
     if (!d.available) continue;
     if (!d.last) continue;
+    if (!isDestinationCompatible(d.destination, riderDest)) continue;
     const activeCount = countActiveRequestsForDriver(roomState, d.id);
     if (activeCount >= MAX_ACTIVE_REQUESTS_PER_DRIVER) continue;
     const distKm = haversineKm(d.last.lat, d.last.lng, riderLat, riderLng);
     if (distKm > MAX_PICKUP_DISTANCE_KM) continue;
     const eta = (distKm / ASSUMED_SPEED_KMH) * 60;
     if (!Number.isFinite(eta)) continue;
+    if (eta > MAX_PICKUP_MINUTES_EFFECTIVE) continue;
     if (!best || eta < best.eta) best = { driver: d, eta };
   }
   return best;
@@ -975,6 +1184,7 @@ function cleanupStale() {
         if (req.status !== "pending") continue;
         if (req.targetDriverId !== driverId) continue;
         roomState.requests.delete(requestId);
+        upsertRideHistoryFromRequest(roomState, roomId, req, "driver_offline");
         try {
           dbDeleteRideRequest(requestId);
         } catch {
@@ -988,6 +1198,7 @@ function cleanupStale() {
       if (req.status === "pending") {
         if (req.createdAt >= cutoffRequest) continue;
         roomState.requests.delete(requestId);
+        upsertRideHistoryFromRequest(roomState, roomId, req, "expired");
         try {
           dbDeleteRideRequest(requestId);
         } catch {
@@ -1000,6 +1211,7 @@ function cleanupStale() {
         if (req.createdAt >= cutoffAssigned) continue;
         unindexAssigned(roomState, req);
         roomState.requests.delete(requestId);
+        upsertRideHistoryFromRequest(roomState, roomId, req, "stale");
         try {
           dbDeleteRideRequest(requestId);
         } catch {
@@ -1344,6 +1556,33 @@ const requestHandler = async (req, res) => {
     return;
   }
 
+  if (url.startsWith("/api/ride/history") && method === "GET") {
+    const auth = requireUserSession(req, res);
+    if (!auth) return;
+    const sp = getSearchParams(url);
+    const limit = clampNumber(Number(sp.get("limit") ?? 40), 1, 100);
+    const rows = dbGetRideHistoryByPhone(auth.session.phone, auth.session.role, limit);
+    json(res, 200, {
+      ok: true,
+      items: rows.map((row) => ({
+        requestId: String(row.requestId),
+        room: sanitizeRoom(row.room),
+        riderName: sanitizeName(row.riderName),
+        riderPhone: sanitizePhone(row.riderPhone),
+        riderDestination: sanitizeDestination(row.riderDestination),
+        driverName: sanitizeName(row.driverName),
+        driverPhone: sanitizePhone(row.driverPhone),
+        driverDestination: sanitizeDestination(row.driverDestination),
+        pickupLat: Number(row.pickupLat),
+        pickupLng: Number(row.pickupLng),
+        status: String(row.status),
+        createdAt: Number(row.createdAt),
+        updatedAt: Number(row.updatedAt),
+      })),
+    });
+    return;
+  }
+
   if (url.startsWith("/api/driver/start") && method === "POST") {
     const body = await readJson(req);
     if (!body) return json(res, 400, { error: "INVALID_JSON" });
@@ -1356,6 +1595,8 @@ const requestHandler = async (req, res) => {
     const driverId = (body.driverId ?? "").toString().trim().slice(0, 80);
     if (!driverId) return json(res, 400, { error: "MISSING_DRIVER_ID" });
     const name = sanitizeName(auth.session.name);
+    const destination = sanitizeDestination(body.destination);
+    if (!destination) return json(res, 400, { error: "MISSING_DRIVER_DESTINATION" });
 
     const { state: roomState } = getRoomState(room);
     const existing = roomState.drivers.get(driverId);
@@ -1364,6 +1605,7 @@ const requestHandler = async (req, res) => {
       id: driverId,
       name,
       phone: sanitizePhone(auth.session.phone),
+      destination,
       available: true,
       last: null,
       updatedAt: now,
@@ -1371,6 +1613,7 @@ const requestHandler = async (req, res) => {
     };
     driver.name = name;
     driver.phone = sanitizePhone(auth.session.phone);
+    driver.destination = destination;
     driver.available = true;
     driver.updatedAt = now;
     driver.lastBroadcastAt = 0;
@@ -1381,6 +1624,7 @@ const requestHandler = async (req, res) => {
       driverId,
       name: driver.name,
       phone: driver.phone,
+      destination: driver.destination,
       updatedAt: now,
       lastBroadcastAt: Number(driver.lastBroadcastAt || 0),
     });
@@ -1408,6 +1652,7 @@ const requestHandler = async (req, res) => {
     const accuracyM = Number.isFinite(Number(body.accuracyM)) ? Number(body.accuracyM) : null;
     const heading = Number.isFinite(Number(body.heading)) ? Number(body.heading) : null;
     const speedMps = Number.isFinite(Number(body.speedMps)) ? Number(body.speedMps) : null;
+    const destination = sanitizeDestination(body.destination);
 
     const { state: roomState } = getRoomState(room);
     const existing = roomState.drivers.get(driverId);
@@ -1415,6 +1660,7 @@ const requestHandler = async (req, res) => {
       id: driverId,
       name: sanitizeName(auth.session.name),
       phone: sanitizePhone(auth.session.phone),
+      destination,
       available: true,
       last: null,
       updatedAt: nowMs(),
@@ -1427,6 +1673,7 @@ const requestHandler = async (req, res) => {
     driver.available = true;
     driver.name = sanitizeName(auth.session.name ?? driver.name);
     driver.phone = sanitizePhone(auth.session.phone ?? driver.phone);
+    if (destination) driver.destination = destination;
     driver.updatedAt = nowMs();
     driver.last = {
       lat,
@@ -1460,6 +1707,7 @@ const requestHandler = async (req, res) => {
       driverId,
       name: driver.name,
       phone: driver.phone,
+      destination: driver.destination,
       lat,
       lng,
       accuracyM,
@@ -1469,6 +1717,48 @@ const requestHandler = async (req, res) => {
       lastBroadcastAt: Number(driver.lastBroadcastAt || 0),
     });
     json(res, 200, { ok: true });
+    return;
+  }
+
+  if (url.startsWith("/api/driver/destination") && method === "POST") {
+    const body = await readJson(req);
+    if (!body) return json(res, 400, { error: "INVALID_JSON" });
+    if (body.__tooLarge) return json(res, 413, { error: "BODY_TOO_LARGE" });
+    if (!requireRoomCodeOr401(body.code, res)) return;
+    const auth = requireDriverSession(req, res, body);
+    if (!auth) return;
+
+    const room = sanitizeRoom(body.room);
+    const driverId = (body.driverId ?? "").toString().trim().slice(0, 80);
+    if (!driverId) return json(res, 400, { error: "MISSING_DRIVER_ID" });
+    const destination = sanitizeDestination(body.destination);
+    if (!destination) return json(res, 400, { error: "MISSING_DRIVER_DESTINATION" });
+
+    const { state: roomState } = getRoomState(room);
+    const existing = roomState.drivers.get(driverId);
+    if (!existing) return json(res, 404, { error: "DRIVER_NOT_FOUND" });
+
+    existing.destination = destination;
+    existing.updatedAt = nowMs();
+    roomState.drivers.set(driverId, existing);
+
+    dbUpsertOnlineDriver({
+      room,
+      driverId,
+      name: existing.name,
+      phone: existing.phone,
+      destination: existing.destination,
+      lat: existing.last?.lat ?? null,
+      lng: existing.last?.lng ?? null,
+      accuracyM: existing.last?.accuracyM ?? null,
+      heading: existing.last?.heading ?? null,
+      speedMps: existing.last?.speedMps ?? null,
+      updatedAt: Number(existing.last?.updatedAt ?? existing.updatedAt ?? nowMs()),
+      lastBroadcastAt: Number(existing.lastBroadcastAt || 0),
+    });
+
+    sendDriverUpdate(roomState, existing);
+    json(res, 200, { ok: true, destination: existing.destination });
     return;
   }
 
@@ -1495,6 +1785,7 @@ const requestHandler = async (req, res) => {
       if (req.status !== "pending") continue;
       if (req.targetDriverId !== driverId) continue;
       roomState.requests.delete(requestId);
+      upsertRideHistoryFromRequest(roomState, room, req, "driver_offline");
       try {
         dbDeleteRideRequest(requestId);
       } catch {
@@ -1530,8 +1821,10 @@ const requestHandler = async (req, res) => {
     const lng = Number(body.lng);
     let targetDriverId = (body.targetDriverId ?? "").toString().trim().slice(0, 80);
     const note = (body.note ?? "").toString().trim().slice(0, 120);
+    const riderDestination = sanitizeDestination(body.destination ?? body.riderDestination);
     if (!isValidPhone(riderPhone)) return json(res, 400, { error: "INVALID_RIDER_PHONE" });
     if (!isValidLatLng(lat, lng)) return json(res, 400, { error: "INVALID_LAT_LNG" });
+    if (!riderDestination) return json(res, 400, { error: "MISSING_RIDER_DESTINATION" });
 
     const registeredDriver = dbGetDriverUserByPhone(riderPhone);
     const registeredDriverActive = registeredDriver
@@ -1552,7 +1845,7 @@ const requestHandler = async (req, res) => {
     }
 
     if (!targetDriverId) {
-      const best = pickBestDriver(roomState, lat, lng);
+      const best = pickBestDriver(roomState, lat, lng, riderDestination);
       if (!best) {
         json(res, 404, { error: "NO_DRIVERS" });
         return;
@@ -1565,6 +1858,9 @@ const requestHandler = async (req, res) => {
     const targetDriver = roomState.drivers.get(targetDriverId);
     if (!targetDriver?.available) return json(res, 404, { error: "DRIVER_NOT_FOUND" });
     if (!targetDriver.last) return json(res, 409, { error: "DRIVER_NO_LOCATION" });
+    if (!isDestinationCompatible(targetDriver.destination, riderDestination)) {
+      return json(res, 409, { error: "DESTINATION_MISMATCH" });
+    }
 
     const activeCount = countActiveRequestsForDriver(roomState, targetDriverId);
     if (activeCount >= MAX_ACTIVE_REQUESTS_PER_DRIVER) {
@@ -1584,12 +1880,18 @@ const requestHandler = async (req, res) => {
       });
       return;
     }
+    const eta = (distKm / ASSUMED_SPEED_KMH) * 60;
+    if (Number.isFinite(eta) && eta > MAX_PICKUP_MINUTES_EFFECTIVE) {
+      json(res, 409, { error: "TOO_FAR", maxMinutes: MAX_PICKUP_MINUTES_EFFECTIVE });
+      return;
+    }
 
     const request = {
       id: randomUUID(),
       riderId,
       name,
       riderPhone,
+      riderDestination,
       note: body.note === "auto" ? "auto" : note,
       lat,
       lng,
@@ -1597,12 +1899,14 @@ const requestHandler = async (req, res) => {
       createdAt: nowMs(),
       targetDriverId,
       targetDriverName: targetDriver.name,
+      targetDriverDestination: sanitizeDestination(targetDriver.destination),
       assignedDriverId: null,
       assignedDriverName: null,
       assignedDriverPhone: null,
     };
     roomState.requests.set(request.id, request);
     dbUpsertRideRequest(room, request);
+    upsertRideHistoryFromRequest(roomState, room, request, "pending");
 
     sendRequestUpdate(roomState, request, "request:new");
     json(res, 201, { ok: true, request: publicRequest(request) });
@@ -1618,10 +1922,12 @@ const requestHandler = async (req, res) => {
     const room = sanitizeRoom(body.room);
     const lat = Number(body.lat);
     const lng = Number(body.lng);
+    const riderDestination = sanitizeDestination(body.destination ?? body.riderDestination);
     if (!isValidLatLng(lat, lng)) return json(res, 400, { error: "INVALID_LAT_LNG" });
+    if (!riderDestination) return json(res, 400, { error: "MISSING_RIDER_DESTINATION" });
 
     const { state: roomState } = getRoomState(room);
-    const best = pickBestDriver(roomState, lat, lng);
+    const best = pickBestDriver(roomState, lat, lng, riderDestination);
     if (!best) {
       json(res, 404, { error: "NO_DRIVERS" });
       return;
@@ -1629,7 +1935,11 @@ const requestHandler = async (req, res) => {
 
     json(res, 200, {
       ok: true,
-      driver: { id: best.driver.id, name: best.driver.name },
+      driver: {
+        id: best.driver.id,
+        name: best.driver.name,
+        destination: sanitizeDestination(best.driver.destination),
+      },
       etaMinutes: Math.round(best.eta * 10) / 10,
     });
     return;
@@ -1656,6 +1966,7 @@ const requestHandler = async (req, res) => {
     request.status = "cancelled";
     unindexAssigned(roomState, request);
     roomState.requests.delete(request.id);
+    upsertRideHistoryFromRequest(roomState, room, request, "cancelled");
     dbDeleteRideRequest(request.id);
     sendRequestRemove(roomState, request, "cancelled");
     json(res, 200, { ok: true });
@@ -1694,8 +2005,10 @@ const requestHandler = async (req, res) => {
     request.assignedDriverId = driverId;
     request.assignedDriverName = driverName;
     request.assignedDriverPhone = driverPhone;
+    request.targetDriverDestination = sanitizeDestination(driver.destination || request.targetDriverDestination);
     indexAssigned(roomState, request);
     dbUpsertRideRequest(room, request);
+    upsertRideHistoryFromRequest(roomState, room, request, "assigned");
 
     // Notify rider + assigned driver
     sendRequestUpdate(roomState, request, "request:update");
@@ -1728,6 +2041,7 @@ const requestHandler = async (req, res) => {
     request.status = "declined";
     unindexAssigned(roomState, request);
     roomState.requests.delete(requestId);
+    upsertRideHistoryFromRequest(roomState, room, request, "declined");
     dbDeleteRideRequest(requestId);
     sendRequestRemove(roomState, request, "declined");
     json(res, 200, { ok: true });
@@ -1758,6 +2072,7 @@ const requestHandler = async (req, res) => {
     request.status = "completed";
     unindexAssigned(roomState, request);
     roomState.requests.delete(requestId);
+    upsertRideHistoryFromRequest(roomState, room, request, "completed");
     dbDeleteRideRequest(requestId);
     sendRequestRemove(roomState, request, "completed");
     json(res, 200, { ok: true });

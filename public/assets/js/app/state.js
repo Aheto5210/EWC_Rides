@@ -45,6 +45,7 @@ export function createState() {
     driver: {
       online: false,
       heartbeatTimer: null,
+      destination: (localStorage.getItem(STORAGE_KEYS.driverDestination) ?? "").trim(),
       auth: {
         token: savedAuth.token,
         role: savedAuth.role,
@@ -55,6 +56,7 @@ export function createState() {
     },
     rider: {
       requestId: localStorage.getItem(STORAGE_KEYS.riderRequestId) || "",
+      destination: (localStorage.getItem(STORAGE_KEYS.riderDestination) ?? "").trim(),
       locked: false,
       assigned: null,
       assignedRequestId: "",
@@ -68,6 +70,10 @@ export function createState() {
     live: {
       drivers: new Map(),
       requests: new Map(),
+    },
+    history: {
+      items: [],
+      loading: false,
     },
   };
 

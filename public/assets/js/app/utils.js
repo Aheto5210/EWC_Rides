@@ -122,3 +122,33 @@ export function mapsDirectionsUrl({ originLat, originLng, destLat, destLng }) {
       : "";
   return `${base}&${dest}${origin}&travelmode=driving`;
 }
+
+export function sanitizeDestinationText(value) {
+  return String(value ?? "").trim().slice(0, 80);
+}
+
+function destinationKey(value) {
+  return sanitizeDestinationText(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export function destinationsCompatible(driverDestination, riderDestination) {
+  const driverKey = destinationKey(driverDestination);
+  const riderKey = destinationKey(riderDestination);
+  if (!driverKey || !riderKey) return false;
+  if (driverKey === riderKey) return true;
+  if (driverKey.includes(riderKey) || riderKey.includes(driverKey)) return true;
+
+  const driverTokens = new Set(driverKey.split(" ").filter(Boolean));
+  const riderTokens = new Set(riderKey.split(" ").filter(Boolean));
+  if (!driverTokens.size || !riderTokens.size) return false;
+
+  let overlap = 0;
+  for (const token of riderTokens) if (driverTokens.has(token)) overlap += 1;
+  if (!overlap) return false;
+  const threshold = Math.max(1, Math.ceil(Math.min(driverTokens.size, riderTokens.size) / 2));
+  return overlap >= threshold;
+}
