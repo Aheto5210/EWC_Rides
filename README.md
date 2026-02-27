@@ -25,6 +25,17 @@ npm run dev
 
 Then open `http://localhost:3331`.
 
+### Frontend build API base
+
+`npm run build` bakes an API base URL into static frontend files.
+
+- Default build API: `https://ewc-rides.onrender.com`
+- Override when needed:
+
+```bash
+API_BASE_URL=https://your-backend.example.com npm run build
+```
+
 ## Test on a phone (location)
 
 Mobile browsers typically require a **secure context** for location. If you open the app from your phone using an IP like `http://192.168.x.x:3331`, location may be blocked.

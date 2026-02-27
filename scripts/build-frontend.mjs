@@ -9,7 +9,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT_DIR = path.join(__dirname, "..");
 
-const API_BASE_URL = process.env.API_BASE_URL || "http://localhost:3331";
+const API_BASE_URL = process.env.API_BASE_URL || "https://ewc-rides.onrender.com";
 const PUBLIC_DIR = path.join(ROOT_DIR, "public");
 const BUILD_DIR = path.join(ROOT_DIR, "build");
 
