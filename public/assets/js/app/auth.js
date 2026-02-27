@@ -63,9 +63,16 @@ export async function registerUser({ name, phone, email, password, role }) {
 }
 
 export async function loginUser({ identifier, password, role }) {
+  const normalized = String(identifier || "").trim();
   return api("/api/auth/login", {
     method: "POST",
-    body: { identifier, password, role },
+    body: {
+      identifier: normalized,
+      email: normalized,
+      phone: normalized,
+      password,
+      role,
+    },
   });
 }
 

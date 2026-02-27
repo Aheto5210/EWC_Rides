@@ -56,6 +56,7 @@ Environment variables:
 
 - `PORT` (default `3331`)
 - `ROOM_CODE` (optional) — if set, clients must provide the code to connect / post updates
+- `DRIVER_DB_FILE` (optional) — absolute path to SQLite file (use persistent disk path on Render/VPS)
 - `MAX_PICKUP_MINUTES` (default `20`) — approximate “within X minutes”
 - `ASSUMED_SPEED_KMH` (default `40`) — used to convert distance → minutes
 - `MAX_PICKUP_DISTANCE_KM` (optional) — overrides the derived distance from minutes/speed
