@@ -1,6 +1,6 @@
 import http from "node:http";
 import https from "node:https";
-import { randomUUID, randomBytes } from "node:crypto";
+import { randomUUID, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import os from "node:os";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -229,6 +229,32 @@ function sanitizeName(name) {
   return trimmed.slice(0, 32);
 }
 
+function sanitizeEmail(email) {
+  const trimmed = (email ?? "").toString().trim().toLowerCase();
+  return trimmed.slice(0, 120);
+}
+
+function sanitizeRole(role) {
+  const value = (role ?? "").toString().trim().toLowerCase();
+  if (value === "driver") return "driver";
+  if (value === "rider") return "rider";
+  return "";
+}
+
+function isValidRole(role) {
+  return role === "driver" || role === "rider";
+}
+
+function isValidEmail(email) {
+  if (!email || typeof email !== "string") return false;
+  // Lightweight validation: enough for auth inputs, avoids excessive complexity.
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+function isValidPassword(password) {
+  return typeof password === "string" && password.length >= 6 && password.length <= 128;
+}
+
 function digitsOnly(value) {
   return (value ?? "").toString().replace(/\D/g, "");
 }
@@ -242,22 +268,28 @@ function isValidPhone(phoneDigits) {
   return typeof phoneDigits === "string" && phoneDigits.length >= 7;
 }
 
-function last4(phoneDigits) {
-  const d = digitsOnly(phoneDigits);
-  return d.slice(Math.max(0, d.length - 4));
-}
-
-function isDriverCodeInUse(code, exceptPhone = "") {
-  const c = digitsOnly(code).slice(0, 4);
-  if (c.length !== 4) return false;
-  const row = dbGetDriverByCode(c);
-  if (!row) return false;
-  if (exceptPhone && row.phone === exceptPhone) return false;
-  return true;
-}
-
 function makeToken() {
   return randomBytes(24).toString("base64url");
+}
+
+function hashPassword(password) {
+  const salt = randomBytes(16).toString("hex");
+  const hash = scryptSync(String(password), salt, 64).toString("hex");
+  return `s2$${salt}$${hash}`;
+}
+
+function verifyPassword(password, storedHash) {
+  try {
+    const parts = String(storedHash || "").split("$");
+    if (parts.length !== 3 || parts[0] !== "s2") return false;
+    const salt = parts[1];
+    const expected = Buffer.from(parts[2], "hex");
+    const actual = scryptSync(String(password), salt, 64);
+    if (expected.length !== actual.length) return false;
+    return timingSafeEqual(expected, actual);
+  } catch {
+    return false;
+  }
 }
 
 async function ensureDir(dir) {
@@ -281,10 +313,13 @@ try {
   // ignore
 }
 db.exec(`
-  CREATE TABLE IF NOT EXISTS drivers (
-    phone TEXT PRIMARY KEY,
-    code TEXT NOT NULL UNIQUE,
+  CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
     name TEXT NOT NULL,
+    phone TEXT,
+    role TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
   );
@@ -346,36 +381,64 @@ db.exec(
 db.exec(
   "CREATE INDEX IF NOT EXISTS idx_ride_requests_room_target_status ON ride_requests(room, target_driver_id, status);",
 );
+db.exec("CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);");
+db.exec("CREATE INDEX IF NOT EXISTS idx_users_phone ON users(phone);");
 
-function dbGetDriverByPhone(phone) {
+function dbGetUserByEmail(email) {
   return (
     db
       .prepare(
-        "SELECT phone, code, name, created_at AS createdAt, updated_at AS updatedAt FROM drivers WHERE phone = ?",
+        "SELECT id, email, password_hash AS passwordHash, name, phone, role, created_at AS createdAt, updated_at AS updatedAt FROM users WHERE email = ?",
+      )
+      .get(email) ?? null
+  );
+}
+
+function dbGetUserById(id) {
+  return (
+    db
+      .prepare(
+        "SELECT id, email, password_hash AS passwordHash, name, phone, role, created_at AS createdAt, updated_at AS updatedAt FROM users WHERE id = ?",
+      )
+      .get(id) ?? null
+  );
+}
+
+function dbGetUserByPhone(phone) {
+  return (
+    db
+      .prepare(
+        "SELECT id, email, password_hash AS passwordHash, name, phone, role, created_at AS createdAt, updated_at AS updatedAt FROM users WHERE phone = ?",
       )
       .get(phone) ?? null
   );
 }
 
-function dbGetDriverByCode(code) {
+function dbGetDriverUserByPhone(phone) {
   return (
     db
       .prepare(
-        "SELECT phone, code, name, created_at AS createdAt, updated_at AS updatedAt FROM drivers WHERE code = ?",
+        "SELECT id, email, name, phone, role FROM users WHERE role = 'driver' AND phone = ?",
       )
-      .get(code) ?? null
+      .get(phone) ?? null
   );
 }
 
-function dbInsertDriver({ phone, code, name, now }) {
+function dbInsertUser({ id, email, passwordHash, name, phone = "", role, now }) {
   db.prepare(
-    "INSERT INTO drivers (phone, code, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-  ).run(phone, code, name, now, now);
+    "INSERT INTO users (id, email, password_hash, name, phone, role, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+  ).run(id, email, passwordHash, name, phone, role, now, now);
 }
 
-function dbCountDrivers() {
-  const row = db.prepare("SELECT COUNT(1) AS n FROM drivers").get();
-  return Number(row?.n ?? 0);
+function toPublicUser(user) {
+  if (!user) return null;
+  return {
+    id: String(user.id || ""),
+    name: sanitizeName(user.name),
+    email: sanitizeEmail(user.email),
+    phone: sanitizePhone(user.phone),
+    role: sanitizeRole(user.role),
+  };
 }
 
 function dbUpsertOnlineDriver({
@@ -533,7 +596,7 @@ function hydratePersistedState() {
   }
 }
 
-const driverSessions = new Map(); // token -> { phone, name, createdAt, expiresAt }
+const authSessions = new Map(); // token -> { userId, email, name, phone, role, createdAt, expiresAt }
 
 function getAuthToken(req, fallbackFromBody = null) {
   const hdr = (req.headers?.authorization ?? "").toString().trim();
@@ -545,23 +608,47 @@ function getAuthToken(req, fallbackFromBody = null) {
   return tokenFromBody.trim();
 }
 
-function requireDriverSession(req, res, body = null) {
+function makeSessionFromUser(user) {
+  const now = nowMs();
+  const token = makeToken();
+  const session = {
+    userId: String(user.id || ""),
+    email: sanitizeEmail(user.email),
+    name: sanitizeName(user.name),
+    phone: sanitizePhone(user.phone),
+    role: sanitizeRole(user.role),
+    createdAt: now,
+    expiresAt: now + DRIVER_SESSION_TTL_MS,
+  };
+  authSessions.set(token, session);
+  return { token, session };
+}
+
+function requireUserSession(req, res, body = null, requiredRole = "") {
   const token = getAuthToken(req, body);
   if (!token) {
-    json(res, 401, { error: "DRIVER_AUTH_REQUIRED" });
+    json(res, 401, { error: "AUTH_REQUIRED" });
     return null;
   }
-  const session = driverSessions.get(token);
+  const session = authSessions.get(token);
   if (!session) {
-    json(res, 401, { error: "DRIVER_AUTH_INVALID" });
+    json(res, 401, { error: "AUTH_INVALID" });
     return null;
   }
   if (session.expiresAt && session.expiresAt < nowMs()) {
-    driverSessions.delete(token);
-    json(res, 401, { error: "DRIVER_AUTH_EXPIRED" });
+    authSessions.delete(token);
+    json(res, 401, { error: "AUTH_EXPIRED" });
+    return null;
+  }
+  if (requiredRole && session.role !== requiredRole) {
+    json(res, 403, { error: "AUTH_ROLE_MISMATCH", role: session.role });
     return null;
   }
   return { token, session };
+}
+
+function requireDriverSession(req, res, body = null) {
+  return requireUserSession(req, res, body, "driver");
 }
 
 function pickLanIp() {
@@ -1077,14 +1164,18 @@ const requestHandler = async (req, res) => {
       return;
     }
     if (role === "driver") {
-      const session = driverSessions.get(token);
+      const session = authSessions.get(token);
       if (!token || !session) {
-        json(res, 401, { error: "DRIVER_AUTH_REQUIRED" });
+        json(res, 401, { error: "AUTH_REQUIRED" });
         return;
       }
       if (session.expiresAt && session.expiresAt < nowMs()) {
-        driverSessions.delete(token);
-        json(res, 401, { error: "DRIVER_AUTH_EXPIRED" });
+        authSessions.delete(token);
+        json(res, 401, { error: "AUTH_EXPIRED" });
+        return;
+      }
+      if (session.role !== "driver") {
+        json(res, 403, { error: "AUTH_ROLE_MISMATCH", role: session.role });
         return;
       }
     }
@@ -1127,93 +1218,129 @@ const requestHandler = async (req, res) => {
     return;
   }
 
-  if (url.startsWith("/api/auth/driver/register") && method === "POST") {
+  if (
+    (url.startsWith("/api/auth/register") || url.startsWith("/api/auth/driver/register")) &&
+    method === "POST"
+  ) {
     const body = await readJson(req);
     if (!body) return json(res, 400, { error: "INVALID_JSON" });
     if (body.__tooLarge) return json(res, 413, { error: "BODY_TOO_LARGE" });
 
     const name = sanitizeName(body.name);
+    const email = sanitizeEmail(body.email);
+    const password = (body.password ?? "").toString();
     const phone = sanitizePhone(body.phone);
+    const forcedRole = url.startsWith("/api/auth/driver/register") ? "driver" : "";
+    const role = forcedRole || sanitizeRole(body.role);
     if (!name) return json(res, 400, { error: "MISSING_NAME" });
+    if (!isValidEmail(email)) return json(res, 400, { error: "INVALID_EMAIL" });
+    if (!isValidPassword(password)) return json(res, 400, { error: "WEAK_PASSWORD" });
     if (!isValidPhone(phone)) return json(res, 400, { error: "INVALID_PHONE" });
+    if (!isValidRole(role)) return json(res, 400, { error: "INVALID_ROLE" });
 
     const now = nowMs();
-    if (dbGetDriverByPhone(phone)) {
+    if (dbGetUserByEmail(email)) {
+      json(res, 409, { error: "EMAIL_IN_USE" });
+      return;
+    }
+    if (dbGetUserByPhone(phone)) {
       json(res, 409, { error: "PHONE_IN_USE" });
       return;
     }
 
-    const code = last4(phone);
-    if (isDriverCodeInUse(code, phone)) {
-      json(res, 409, { error: "CODE_IN_USE" });
-      return;
-    }
-
+    const id = randomUUID();
+    const passwordHash = hashPassword(password);
     try {
-      dbInsertDriver({ phone, code, name, now });
+      dbInsertUser({ id, email, passwordHash, name, phone, role, now });
     } catch {
-      // If another registration raced us.
-      if (dbGetDriverByPhone(phone)) return json(res, 409, { error: "PHONE_IN_USE" });
-      if (dbGetDriverByCode(code)) return json(res, 409, { error: "CODE_IN_USE" });
+      if (dbGetUserByEmail(email)) return json(res, 409, { error: "EMAIL_IN_USE" });
+      if (dbGetUserByPhone(phone)) return json(res, 409, { error: "PHONE_IN_USE" });
       return json(res, 500, { error: "REGISTER_FAILED" });
     }
 
-    setCookie(res, "ewc_driver_phone", phone, {
+    const created = dbGetUserById(id);
+    if (!created) return json(res, 500, { error: "REGISTER_FAILED" });
+    const { token } = makeSessionFromUser(created);
+    const user = toPublicUser(created);
+
+    setCookie(res, "ewc_user_id", user.id, {
       maxAgeSeconds: Math.floor(DRIVER_SESSION_TTL_MS / 1_000),
       httpOnly: true,
       sameSite: "Lax",
       secure: false,
     });
 
-    json(res, 201, {
+    const payload = {
       ok: true,
-      driver: { name, phoneLast4: last4(phone) },
-      code,
-    });
+      token,
+      user,
+    };
+    if (user.role === "driver") payload.driver = { name: user.name, phone: user.phone };
+    json(res, 201, payload);
     return;
   }
 
-  if (url.startsWith("/api/auth/driver/login") && method === "POST") {
+  if (
+    (url.startsWith("/api/auth/login") || url.startsWith("/api/auth/driver/login")) &&
+    method === "POST"
+  ) {
     const body = await readJson(req);
     if (!body) return json(res, 400, { error: "INVALID_JSON" });
     if (body.__tooLarge) return json(res, 413, { error: "BODY_TOO_LARGE" });
 
-    const code = digitsOnly(body.code).slice(0, 4);
-    if (!code || code.length !== 4) return json(res, 400, { error: "INVALID_CODE" });
+    const email = sanitizeEmail(body.email);
+    const password = (body.password ?? "").toString();
+    const forcedRole = url.startsWith("/api/auth/driver/login") ? "driver" : "";
+    const requestedRole = forcedRole || sanitizeRole(body.role);
+    if (!isValidEmail(email)) return json(res, 400, { error: "INVALID_EMAIL" });
+    if (!password) return json(res, 400, { error: "MISSING_PASSWORD" });
+    if (body.role && !isValidRole(requestedRole)) return json(res, 400, { error: "INVALID_ROLE" });
 
-    const record = dbGetDriverByCode(code);
-    if (!record) return json(res, 404, { error: "DRIVER_NOT_REGISTERED" });
-    const phone = sanitizePhone(record.phone);
+    const user = dbGetUserByEmail(email);
+    if (!user || !verifyPassword(password, user.passwordHash)) {
+      return json(res, 401, { error: "AUTH_INVALID_CREDENTIALS" });
+    }
+    if (requestedRole && user.role !== requestedRole) {
+      return json(res, 403, { error: "AUTH_ROLE_MISMATCH", role: user.role });
+    }
 
-    const token = makeToken();
-    const now = nowMs();
-    driverSessions.set(token, {
-      phone,
-      name: record.name,
-      createdAt: now,
-      expiresAt: now + DRIVER_SESSION_TTL_MS,
-    });
+    const { token } = makeSessionFromUser(user);
+    const publicUser = toPublicUser(user);
 
-    setCookie(res, "ewc_driver_phone", phone, {
+    setCookie(res, "ewc_user_id", publicUser.id, {
       maxAgeSeconds: Math.floor(DRIVER_SESSION_TTL_MS / 1_000),
       httpOnly: true,
       sameSite: "Lax",
       secure: false,
     });
 
-    json(res, 200, {
+    const payload = {
       ok: true,
       token,
-      driver: { name: record.name, phone, phoneLast4: code },
-    });
+      user: publicUser,
+    };
+    if (publicUser.role === "driver") {
+      payload.driver = { name: publicUser.name, phone: publicUser.phone };
+    }
+    json(res, 200, payload);
     return;
   }
 
-  if (url.startsWith("/api/auth/driver/me") && method === "GET") {
-    const auth = requireDriverSession(req, res);
+  if ((url.startsWith("/api/auth/me") || url.startsWith("/api/auth/driver/me")) && method === "GET") {
+    const requiredRole = url.startsWith("/api/auth/driver/me") ? "driver" : "";
+    const auth = requireUserSession(req, res, null, requiredRole);
     if (!auth) return;
-    const { phone, name } = auth.session;
-    json(res, 200, { ok: true, driver: { name, phone, phoneLast4: last4(phone) } });
+    const user = dbGetUserById(auth.session.userId);
+    if (!user) {
+      authSessions.delete(auth.token);
+      return json(res, 401, { error: "AUTH_INVALID" });
+    }
+    const publicUser = toPublicUser(user);
+    const payload = { ok: true, user: publicUser };
+    if (publicUser.role === "driver") {
+      payload.driver = { name: publicUser.name, phone: publicUser.phone };
+    }
+    json(res, 200, payload);
     return;
   }
 
@@ -1406,7 +1533,7 @@ const requestHandler = async (req, res) => {
     if (!isValidPhone(riderPhone)) return json(res, 400, { error: "INVALID_RIDER_PHONE" });
     if (!isValidLatLng(lat, lng)) return json(res, 400, { error: "INVALID_LAT_LNG" });
 
-    const registeredDriver = dbGetDriverByPhone(riderPhone);
+    const registeredDriver = dbGetDriverUserByPhone(riderPhone);
     const registeredDriverActive = registeredDriver
       ? isRegisteredDriverOnlineInRoom(roomState, riderPhone)
       : false;

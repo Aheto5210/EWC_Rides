@@ -1,13 +1,13 @@
 import { STORAGE_KEYS } from "./constants.js";
 import { loadActivity } from "./activity.js";
-import { loadDriverAuth } from "./auth.js";
+import { loadAuth } from "./auth.js";
 import { getOrCreateDeviceId } from "./storage.js";
 import { sanitizeRoom } from "./utils.js";
 
 export const urlParams = new URLSearchParams(location.search);
 
 export function createState() {
-  const savedAuth = loadDriverAuth();
+  const savedAuth = loadAuth();
   const state = {
     deviceId: getOrCreateDeviceId(),
     room: sanitizeRoom(urlParams.get("room") ?? localStorage.getItem(STORAGE_KEYS.room)),
@@ -47,6 +47,8 @@ export function createState() {
       heartbeatTimer: null,
       auth: {
         token: savedAuth.token,
+        role: savedAuth.role,
+        email: savedAuth.email,
         phone: savedAuth.phone,
         name: savedAuth.name,
       },

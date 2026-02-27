@@ -145,34 +145,63 @@ export function createSheet(state, els) {
     });
   }
 
-  function promptDriverRegister() {
+  function promptAuthRegister() {
     return new Promise((resolve) => {
       const body = document.createElement("div");
+      const savedName = (localStorage.getItem(STORAGE_KEYS.authName) ?? "").trim();
+      const savedPhone = (localStorage.getItem(STORAGE_KEYS.authPhone) ?? "").trim();
+      const savedEmail = (localStorage.getItem(STORAGE_KEYS.authEmail) ?? "").trim();
+      const savedRole = (localStorage.getItem(STORAGE_KEYS.authRole) ?? "").trim().toLowerCase();
 
       body.innerHTML = `
-        <div class="muted">Register once. Your 4-digit code is your phone’s last 4 digits.</div>
+        <div class="muted">Create your account and choose how you use EWC Rides.</div>
         <label class="field">
-          <span class="field__label">First name</span>
+          <span class="field__label">Name</span>
           <input id="sheetRegName" class="input" autocomplete="given-name" placeholder="e.g., John" />
         </label>
         <label class="field">
           <span class="field__label">Phone</span>
           <input id="sheetRegPhone" class="input" inputmode="tel" autocomplete="tel" placeholder="e.g., 4045551234" />
         </label>
+        <label class="field">
+          <span class="field__label">Email</span>
+          <input id="sheetRegEmail" class="input" inputmode="email" autocomplete="email" placeholder="e.g., john@email.com" />
+        </label>
+        <label class="field">
+          <span class="field__label">Password</span>
+          <input id="sheetRegPassword" class="input" type="password" autocomplete="new-password" placeholder="At least 6 characters" />
+        </label>
+        <label class="field">
+          <span class="field__label">I will use this as</span>
+          <select id="sheetRegRole" class="input">
+            <option value="driver">A Driver</option>
+            <option value="rider">A Rider</option>
+          </select>
+        </label>
       `;
 
-      openSheet({ title: "Register as a driver", body, confirmText: "Register" });
+      openSheet({ title: "Register", body, confirmText: "Create account" });
 
       const nameInput = body.querySelector("#sheetRegName");
       const phoneInput = body.querySelector("#sheetRegPhone");
+      const emailInput = body.querySelector("#sheetRegEmail");
+      const passwordInput = body.querySelector("#sheetRegPassword");
+      const roleInput = body.querySelector("#sheetRegRole");
+      if (nameInput) nameInput.value = savedName;
+      if (phoneInput) phoneInput.value = formatPhoneDigits(savedPhone);
+      if (emailInput) emailInput.value = savedEmail;
+      if (roleInput && (savedRole === "driver" || savedRole === "rider")) roleInput.value = savedRole;
 
       state.sheet.onClose = () => resolve(null);
       state.sheet.onConfirm = async () => {
         const name = (nameInput?.value ?? "").trim();
         const phoneDigits = digitsOnly(phoneInput?.value ?? "");
+        const email = (emailInput?.value ?? "").trim().toLowerCase();
+        const password = (passwordInput?.value ?? "").toString();
+        const role = (roleInput?.value ?? "").toString().trim().toLowerCase();
 
         if (!name) {
-          setSheetError("Please enter your first name.");
+          setSheetError("Please enter your name.");
           nameInput?.focus();
           return;
         }
@@ -181,94 +210,71 @@ export function createSheet(state, els) {
           phoneInput?.focus();
           return;
         }
-
-        state.sheet.onClose = null;
-        resolve({ name, phone: phoneDigits });
-        closeSheet();
-      };
-    });
-  }
-
-  function promptDriverCode() {
-    return new Promise((resolve) => {
-      const body = document.createElement("div");
-
-      body.innerHTML = `
-        <div class="muted">Enter your 4-digit driver code to continue.</div>
-        <label class="field">
-          <span class="field__label">4-digit code</span>
-          <input id="sheetLoginCode" class="input" inputmode="numeric" autocomplete="one-time-code" placeholder="e.g., 1234" maxlength="4" />
-        </label>
-      `;
-
-      openSheet({ title: "Driver access", body, confirmText: "Continue" });
-
-      const codeInput = body.querySelector("#sheetLoginCode");
-
-      state.sheet.onClose = () => resolve(null);
-      state.sheet.onConfirm = async () => {
-        const codeDigits = digitsOnly(codeInput?.value ?? "").slice(0, 4);
-
-        if (codeDigits.length !== 4) {
-          setSheetError("Enter your 4-digit code.");
-          codeInput?.focus();
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+          setSheetError("Please enter a valid email address.");
+          emailInput?.focus();
+          return;
+        }
+        if (password.length < 6) {
+          setSheetError("Password should be at least 6 characters.");
+          passwordInput?.focus();
+          return;
+        }
+        if (role !== "driver" && role !== "rider") {
+          setSheetError("Please choose a role.");
+          roleInput?.focus();
           return;
         }
 
         state.sheet.onClose = null;
-        resolve({ code: codeDigits });
+        resolve({ name, phone: phoneDigits, email, password, role });
         closeSheet();
       };
     });
   }
 
-  function showDriverCode(code) {
+  function promptRoleLogin(role = "driver") {
     return new Promise((resolve) => {
       const body = document.createElement("div");
+      const savedEmail = (localStorage.getItem(STORAGE_KEYS.authEmail) ?? "").trim();
+      const roleLabel = role === "driver" ? "driver" : "rider";
+
       body.innerHTML = `
-        <div class="notice" style="margin: 0;">
-          <div style="font-weight: 850; letter-spacing: 0.4px;">Your driver code</div>
-          <div style="font-size: 34px; font-weight: 900; letter-spacing: 3px; margin-top: 6px;">${code}</div>
-          <div class="muted" style="margin-top: 8px;">Use this code when you tap “I’m a Driver”.</div>
-        </div>
+        <div class="muted">Sign in to continue as a ${roleLabel}.</div>
+        <label class="field">
+          <span class="field__label">Email</span>
+          <input id="sheetLoginEmail" class="input" inputmode="email" autocomplete="email" placeholder="e.g., john@email.com" />
+        </label>
+        <label class="field">
+          <span class="field__label">Password</span>
+          <input id="sheetLoginPassword" class="input" type="password" autocomplete="current-password" placeholder="Your password" />
+        </label>
       `;
 
-      openSheet({ title: "Registered", body, confirmText: "Done" });
-      state.sheet.onClose = () => resolve(false);
-      state.sheet.onConfirm = async () => {
-        state.sheet.onClose = null;
-        resolve(true);
-        closeSheet();
-      };
-    });
-  }
+      openSheet({ title: "Sign in", body, confirmText: "Continue" });
 
-  function promptDriverPick(choices) {
-    return new Promise((resolve) => {
-      const body = document.createElement("div");
-      body.innerHTML = `
-        <div class="muted">Multiple drivers match this code. Pick your name.</div>
-        <div class="list" style="margin-top: 6px;"></div>
-      `;
-      const list = body.querySelector(".list");
-      for (let i = 0; i < (choices || []).length; i += 1) {
-        const c = choices[i];
-        const btn = document.createElement("button");
-        btn.type = "button";
-        btn.className = "btn btn--block";
-        btn.textContent = c?.name ? String(c.name) : `Driver ${i + 1}`;
-        btn.addEventListener("click", () => {
-          state.sheet.onClose = null;
-          resolve(i);
-          closeSheet();
-        });
-        list?.appendChild(btn);
-      }
+      const emailInput = body.querySelector("#sheetLoginEmail");
+      const passwordInput = body.querySelector("#sheetLoginPassword");
+      if (emailInput) emailInput.value = savedEmail;
 
-      openSheet({ title: "Choose driver", body, confirmText: "Cancel" });
       state.sheet.onClose = () => resolve(null);
       state.sheet.onConfirm = async () => {
-        resolve(null);
+        const email = (emailInput?.value ?? "").trim().toLowerCase();
+        const password = (passwordInput?.value ?? "").toString();
+
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+          setSheetError("Enter a valid email address.");
+          emailInput?.focus();
+          return;
+        }
+        if (!password) {
+          setSheetError("Enter your password.");
+          passwordInput?.focus();
+          return;
+        }
+
+        state.sheet.onClose = null;
+        resolve({ email, password });
         closeSheet();
       };
     });
@@ -280,9 +286,7 @@ export function createSheet(state, els) {
     setSheetError,
     promptRiderContact,
     promptDriverContact,
-    promptDriverRegister,
-    promptDriverCode,
-    showDriverCode,
-    promptDriverPick,
+    promptAuthRegister,
+    promptRoleLogin,
   };
 }

@@ -1,9 +1,10 @@
 # EWC Live App (Ride Pickup MVP)
 
-This is a lightweight “no-login” web app for church members (mobile-first):
+This is a lightweight mobile-first web app for church members:
 
+- Users **register with email + password** and choose a role (**driver** or **rider**).
 - **Drivers** go online to share live location.
-- **Riders** instantly see a **list of available drivers** with distance.
+- **Riders** see a **list of available drivers** with distance/ETA.
 - Riders tap a driver to send a **pickup request** to that driver.
 - Drivers can **accept** and **open Google Maps** to navigate to pickup.
 

@@ -27,10 +27,11 @@ All endpoints below are relative to the base URL.
 - The server expects a device identifier in SSE query params (`id=...`) and in several POST bodies (`driverId`, `riderId`).
 - On Flutter, generate a UUID on first launch and persist it (SharedPreferences / secure storage).
 
-### Auth (drivers)
+### Auth
 
-- Drivers authenticate using a 4‑digit code (derived from last 4 digits of phone at registration time).
-- Driver login returns a `token` (bearer token). Send it as:
+- Users authenticate with `email + password`.
+- Registration requires choosing a role: `driver` or `rider`.
+- Login returns a `token` (bearer token). Send it as:
   - `Authorization: Bearer <token>`
 
 ## Responses and errors
@@ -145,34 +146,21 @@ Use `package:http` and parse the streamed response as text lines:
 Implementation note:
 - iOS/Android can buffer; keep `proxy_buffering off` in Nginx for `/api/stream`.
 
-## Driver auth
+## Authentication
 
-### Register driver
+### Register user
 
-**POST** `/api/auth/driver/register`
-
-Body:
-```json
-{ "name": "John", "phone": "233555123456" }
-```
-
-Response:
-```json
-{ "ok": true, "driver": { "name": "John", "phoneLast4": "3456" }, "code": "3456" }
-```
-
-Common errors:
-- `PHONE_IN_USE` (409)
-- `CODE_IN_USE` (409)
-- `INVALID_PHONE` (400)
-
-### Login driver
-
-**POST** `/api/auth/driver/login`
+**POST** `/api/auth/register`
 
 Body:
 ```json
-{ "code": "3456" }
+{
+  "name": "John",
+  "phone": "233555123456",
+  "email": "john@email.com",
+  "password": "secret123",
+  "role": "driver"
+}
 ```
 
 Response:
@@ -180,28 +168,87 @@ Response:
 {
   "ok": true,
   "token": "<bearer-token>",
-  "driver": { "name": "John", "phone": "233555123456", "phoneLast4": "3456" }
+  "user": {
+    "id": "<uuid>",
+    "name": "John",
+    "email": "john@email.com",
+    "phone": "233555123456",
+    "role": "driver"
+  },
+  "driver": { "name": "John", "phone": "233555123456" }
 }
 ```
 
 Common errors:
-- `DRIVER_NOT_REGISTERED` (404)
-- `INVALID_CODE` (400)
+- `EMAIL_IN_USE` (409)
+- `PHONE_IN_USE` (409)
+- `INVALID_EMAIL` / `INVALID_PHONE` / `INVALID_ROLE` (400)
+- `WEAK_PASSWORD` (400)
 
-### Get current driver (token validation)
+### Login user
 
-**GET** `/api/auth/driver/me`
+**POST** `/api/auth/login`
+
+Body:
+```json
+{
+  "email": "john@email.com",
+  "password": "secret123",
+  "role": "driver"
+}
+```
+
+`role` is optional but recommended so you can enforce expected role in mobile flow.
+
+Response:
+```json
+{
+  "ok": true,
+  "token": "<bearer-token>",
+  "user": {
+    "id": "<uuid>",
+    "name": "John",
+    "email": "john@email.com",
+    "phone": "233555123456",
+    "role": "driver"
+  },
+  "driver": { "name": "John", "phone": "233555123456" }
+}
+```
+
+Common errors:
+- `AUTH_INVALID_CREDENTIALS` (401)
+- `AUTH_ROLE_MISMATCH` (403)
+
+### Validate session token
+
+**GET** `/api/auth/me`
 
 Header:
 - `Authorization: Bearer <token>`
 
 Response:
 ```json
-{ "ok": true, "driver": { "name": "John", "phone": "233555123456", "phoneLast4": "3456" } }
+{
+  "ok": true,
+  "user": {
+    "id": "<uuid>",
+    "name": "John",
+    "email": "john@email.com",
+    "phone": "233555123456",
+    "role": "driver"
+  },
+  "driver": { "name": "John", "phone": "233555123456" }
+}
 ```
 
 Common errors:
-- `DRIVER_AUTH_REQUIRED` / `DRIVER_AUTH_INVALID` / `DRIVER_AUTH_EXPIRED` (401)
+- `AUTH_REQUIRED` / `AUTH_INVALID` / `AUTH_EXPIRED` (401)
+
+Compatibility aliases still exist for driver-only clients:
+- `POST /api/auth/driver/register`
+- `POST /api/auth/driver/login`
+- `GET /api/auth/driver/me`
 
 ## Driver presence + location (requires bearer token)
 

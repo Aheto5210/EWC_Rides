@@ -4,12 +4,11 @@ const API_BASE = "__API_BASE_URL__";
 import { api } from "./api.js";
 import { addActivity, clearActivity, renderActivity } from "./activity.js";
 import {
-  clearDriverAuth,
-  getDriverMe,
-  loginDriver,
-  resolveDriverLogin,
-  registerDriver,
-  saveDriverAuth,
+  clearAuth,
+  getAuthMe,
+  loginUser,
+  registerUser,
+  saveAuth,
 } from "./auth.js";
 import { createAudio } from "./audio.js";
 import { callButtonHtml } from "./call.js";
@@ -47,11 +46,8 @@ const sheet = createSheet(state, els);
 const {
   closeSheet,
   promptRiderContact,
-  promptDriverContact,
-  promptDriverRegister,
-  promptDriverCode,
-  promptDriverPick,
-  showDriverCode,
+  promptAuthRegister,
+  promptRoleLogin,
 } = sheet;
 
 const audio = createAudio({ state });
@@ -334,84 +330,115 @@ function connectStream() {
   });
 }
 
-function driverAuthHeaders() {
+function authHeaders() {
   const token = (state.driver.auth.token ?? "").trim();
   if (!token) return {};
   return { authorization: `Bearer ${token}` };
 }
 
-function saveDriverAuthState({ token, driver }) {
+function saveAuthState({ token, user }) {
   if (token) state.driver.auth.token = token;
-  if (driver?.phone) state.driver.auth.phone = digitsOnly(driver.phone);
-  if (driver?.name) state.driver.auth.name = String(driver.name || "").trim();
-  saveDriverAuth({
+  if (user?.role) state.driver.auth.role = String(user.role || "").trim().toLowerCase();
+  if (user?.email) state.driver.auth.email = String(user.email || "").trim().toLowerCase();
+  if (user?.phone) state.driver.auth.phone = digitsOnly(user.phone);
+  if (user?.name) state.driver.auth.name = String(user.name || "").trim();
+  saveAuth({
     token: state.driver.auth.token,
+    role: state.driver.auth.role,
+    email: state.driver.auth.email,
     phone: state.driver.auth.phone,
     name: state.driver.auth.name,
   });
+
+  if (state.driver.auth.name) {
+    if (state.driver.auth.role === "driver") localStorage.setItem(STORAGE_KEYS.driverName, state.driver.auth.name);
+    if (state.driver.auth.role === "rider") localStorage.setItem(STORAGE_KEYS.riderName, state.driver.auth.name);
+  }
+  if (isValidPhoneDigits(state.driver.auth.phone)) {
+    if (state.driver.auth.role === "driver") localStorage.setItem(STORAGE_KEYS.driverPhone, state.driver.auth.phone);
+    if (state.driver.auth.role === "rider") localStorage.setItem(STORAGE_KEYS.riderPhone, state.driver.auth.phone);
+  }
 }
 
-function resetDriverAuthState() {
+function resetAuthState() {
   state.driver.auth.token = "";
+  state.driver.auth.role = "";
+  state.driver.auth.email = "";
   state.driver.auth.phone = "";
   state.driver.auth.name = "";
-  clearDriverAuth();
+  clearAuth();
 }
 
-async function ensureDriverAuth({ interactive } = { interactive: false }) {
+function roleLabel(role) {
+  if (role === "driver") return "driver";
+  if (role === "rider") return "rider";
+  return "another";
+}
+
+async function ensureRoleAuth(requiredRole, { interactive } = { interactive: false }) {
   const token = (state.driver.auth.token ?? "").trim();
   if (token) {
     try {
-      const me = await getDriverMe(token);
-      saveDriverAuthState({ token, driver: me.driver });
-      return true;
+      const me = await getAuthMe(token);
+      if (me?.user) saveAuthState({ token, user: me.user });
+      const activeRole = String(me?.user?.role || state.driver.auth.role || "").trim().toLowerCase();
+      if (!requiredRole || activeRole === requiredRole) return true;
+      if (!interactive) return false;
+      notify({
+        title: "Sign in required",
+        body: `This account is registered as ${roleLabel(activeRole)}. Use a ${roleLabel(
+          requiredRole,
+        )} account to continue.`,
+        tone: "warning",
+        durationMs: 6000,
+      });
+      resetAuthState();
     } catch {
-      resetDriverAuthState();
+      resetAuthState();
     }
   }
 
   if (!interactive) return false;
 
-  let phone = digitsOnly(
-    state.driver.auth.phone || localStorage.getItem(STORAGE_KEYS.driverAuthPhone) || "",
-  );
-
-  const entered = await promptDriverCode();
+  const entered = await promptRoleLogin(requiredRole);
   if (!entered) return false;
 
   try {
-    const result = await loginDriver({
-      phone: isValidPhoneDigits(phone) ? phone : "",
-      code: entered.code,
+    const result = await loginUser({
+      email: entered.email,
+      password: entered.password,
+      role: requiredRole,
     });
-    saveDriverAuthState({ token: result.token, driver: result.driver });
+    saveAuthState({ token: result.token, user: result.user });
     return true;
   } catch (e) {
-    if (e.message === "CODE_AMBIGUOUS" && Array.isArray(e.data?.choices)) {
-      const idx = await promptDriverPick(e.data.choices);
-      if (idx === null || typeof idx === "undefined") return false;
-      try {
-        const resolved = await resolveDriverLogin({
-          challengeId: e.data.challengeId,
-          choiceIndex: idx,
-        });
-        saveDriverAuthState({ token: resolved.token, driver: resolved.driver });
-        return true;
-      } catch (e2) {
-        notify({ title: "Driver access", body: e2.message, tone: "danger", durationMs: 5000 });
-        return false;
-      }
-    }
-
+    const mismatchRole = String(e?.data?.role || "").trim().toLowerCase();
     const msg =
-      e.message === "DRIVER_NOT_REGISTERED"
-        ? "Not registered yet. Tap “Register” (top right) first."
-        : e.message === "INVALID_CODE"
-          ? "Wrong code. Try again."
+      e.message === "AUTH_INVALID_CREDENTIALS"
+        ? "Wrong email or password."
+        : e.message === "AUTH_ROLE_MISMATCH"
+          ? `This account is registered as ${roleLabel(mismatchRole)}.`
+          : e.message === "INVALID_EMAIL"
+            ? "Enter a valid email."
+            : e.message === "MISSING_PASSWORD"
+              ? "Enter your password."
           : e.message;
-    notify({ title: "Driver access", body: msg, tone: "danger", durationMs: 5000 });
+    notify({
+      title: "Sign in failed",
+      body: msg,
+      tone: "danger",
+      durationMs: 6000,
+    });
     return false;
   }
+}
+
+async function ensureDriverAuth({ interactive } = { interactive: false }) {
+  return ensureRoleAuth("driver", { interactive });
+}
+
+async function ensureRiderAuth({ interactive } = { interactive: false }) {
+  return ensureRoleAuth("rider", { interactive });
 }
 
 function showRole(role) {
@@ -450,7 +477,7 @@ async function postDriverLocation() {
 
   await api("/api/driver/update", {
     method: "POST",
-    headers: driverAuthHeaders(),
+    headers: authHeaders(),
     body: {
       room: state.room,
       code: state.roomCode || undefined,
@@ -495,7 +522,7 @@ async function setDriverOnline(online) {
 
     await api("/api/driver/start", {
       method: "POST",
-      headers: driverAuthHeaders(),
+      headers: authHeaders(),
       body: {
         room: state.room,
         code: state.roomCode || undefined,
@@ -513,7 +540,7 @@ async function setDriverOnline(online) {
     }
     await api("/api/driver/stop", {
       method: "POST",
-      headers: driverAuthHeaders(),
+      headers: authHeaders(),
       body: {
         room: state.room,
         code: state.roomCode || undefined,
@@ -604,7 +631,7 @@ async function acceptRequest(req) {
 
   const result = await api("/api/ride/accept", {
     method: "POST",
-    headers: driverAuthHeaders(),
+    headers: authHeaders(),
     body: {
       room: state.room,
       code: state.roomCode || undefined,
@@ -627,7 +654,7 @@ async function declineRequest(req) {
   if (!(await ensureDriverAuth({ interactive: true }))) throw new Error("CANCELLED");
   await api("/api/ride/decline", {
     method: "POST",
-    headers: driverAuthHeaders(),
+    headers: authHeaders(),
     body: {
       room: state.room,
       code: state.roomCode || undefined,
@@ -1128,32 +1155,52 @@ function initEvents() {
       els.btnRoleDriver.disabled = false;
     }
   });
-  els.btnRoleRider.addEventListener("click", () => showRole("rider"));
+  els.btnRoleRider.addEventListener("click", async () => {
+    els.btnRoleRider.disabled = true;
+    try {
+      const ok = await ensureRiderAuth({ interactive: true });
+      if (!ok) return;
+      showRole("rider");
+    } finally {
+      els.btnRoleRider.disabled = false;
+    }
+  });
   els.btnRegisterDriver.addEventListener("click", async () => {
     els.btnRegisterDriver.disabled = true;
     try {
-      const entered = await promptDriverRegister();
+      const entered = await promptAuthRegister();
       if (!entered) return;
 
-      const reg = await registerDriver({ name: entered.name, phone: entered.phone });
-      saveDriverAuthState({ token: "", driver: { name: entered.name, phone: entered.phone } });
+      const reg = await registerUser({
+        name: entered.name,
+        phone: entered.phone,
+        email: entered.email,
+        password: entered.password,
+        role: entered.role,
+      });
+      if (reg?.user) saveAuthState({ token: reg.token, user: reg.user });
 
-      await showDriverCode(reg.code || "");
-
-      try {
-        const login = await loginDriver({ phone: entered.phone, code: reg.code });
-        saveDriverAuthState({ token: login.token, driver: login.driver });
-      } catch {
-        // ignore auto-login errors; driver can login manually.
-      }
+      notify({
+        title: "Registration successful",
+        body:
+          entered.role === "driver"
+            ? "You can now tap “I’m a Driver”."
+            : "You can now tap “I Need a Ride”.",
+        tone: "success",
+        durationMs: 4500,
+      });
       renderAll();
     } catch (e) {
       const msg =
-        e.message === "PHONE_IN_USE"
-          ? "This phone number is already registered. Tap “I’m a Driver” and enter your code."
-          : e.message === "CODE_IN_USE"
-            ? "This code is already in use by another driver. Please use a different phone number."
-            : e.message;
+        e.message === "EMAIL_IN_USE"
+          ? "This email is already registered. Sign in instead."
+          : e.message === "WEAK_PASSWORD"
+            ? "Password should be at least 6 characters."
+            : e.message === "PHONE_IN_USE"
+              ? "This phone number is already registered."
+              : e.message === "INVALID_ROLE"
+                ? "Choose whether this account is for driver or rider."
+                : e.message;
       notify({ title: "Register", body: msg, tone: "danger", durationMs: 6000 });
     } finally {
       els.btnRegisterDriver.disabled = false;
@@ -1274,6 +1321,13 @@ async function init() {
 
   if (state.role === "driver") {
     const ok = await ensureDriverAuth({ interactive: false });
+    if (!ok) {
+      state.role = "";
+      localStorage.removeItem(STORAGE_KEYS.role);
+    }
+  }
+  if (state.role === "rider") {
+    const ok = await ensureRiderAuth({ interactive: false });
     if (!ok) {
       state.role = "";
       localStorage.removeItem(STORAGE_KEYS.role);
