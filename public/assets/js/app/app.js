@@ -15,6 +15,7 @@ import { callButtonHtml } from "./call.js";
 import { els } from "./dom.js";
 import { createGeo } from "./geo.js";
 import { createNotifications } from "./notifications.js";
+import { createPlaces } from "./places.js";
 import { createSheet } from "./sheet.js";
 import { createState } from "./state.js";
 import { initTheme } from "./theme.js";
@@ -48,10 +49,10 @@ const {
   closeSheet,
   openSheet,
   promptRiderContact,
-  promptDestination,
   promptAuthRegister,
   promptRoleLogin,
 } = sheet;
+const places = createPlaces();
 
 const audio = createAudio({ state });
 const {
@@ -78,10 +79,84 @@ const geo = createGeo({ state, els, onChange: handleGeoChange });
 const { setLocationText, primeLocation, startGeoWatch, stopGeoWatch } = geo;
 
 function handleGeoChange() {
+  syncCurrentLocationLabels();
+  refreshCurrentLocationLabel().catch(() => {});
   if (state.role === "driver" && state.driver.online) {
     postDriverLocation().catch(() => {});
   }
   renderAll();
+}
+
+function fallbackGeoLabel() {
+  if (!state.geo.last) return "Current location not available";
+  return `${Number(state.geo.last.lat).toFixed(5)}, ${Number(state.geo.last.lng).toFixed(5)}`;
+}
+
+function currentLocationLabel() {
+  if (state.ui.lastGeoLabel) return state.ui.lastGeoLabel;
+  return fallbackGeoLabel();
+}
+
+function syncCurrentLocationLabels() {
+  const label = state.geo.last
+    ? `From: ${currentLocationLabel()}`
+    : "From: Detecting current location…";
+  if (els.driverFromText) els.driverFromText.textContent = label;
+  if (els.riderFromText) els.riderFromText.textContent = label;
+}
+
+async function refreshCurrentLocationLabel() {
+  if (!state.geo.last) return;
+  const now = Date.now();
+  if (now - Number(state.ui.geoLabelFetchAt || 0) < 15_000) return;
+  state.ui.geoLabelFetchAt = now;
+
+  const next = await places.reverseGeocode({
+    lat: state.geo.last.lat,
+    lng: state.geo.last.lng,
+  });
+  if (!next) {
+    if (!state.ui.lastGeoLabel) state.ui.lastGeoLabel = fallbackGeoLabel();
+  } else {
+    state.ui.lastGeoLabel = next;
+  }
+  syncCurrentLocationLabels();
+}
+
+async function fillDestinationSuggestions(listEl, query = "") {
+  if (!listEl) return;
+  const suggestions = await places.suggest(query);
+  listEl.innerHTML = "";
+  for (const value of suggestions.slice(0, 3)) {
+    const option = document.createElement("option");
+    option.value = value;
+    listEl.appendChild(option);
+  }
+}
+
+function bindDestinationInput(inputEl, listEl, onSave) {
+  if (!inputEl || !listEl) return;
+  let timer = null;
+
+  const saveValue = () => {
+    const value = sanitizeDestinationText(inputEl.value);
+    inputEl.value = value;
+    onSave(value);
+  };
+
+  inputEl.addEventListener("focus", () => {
+    fillDestinationSuggestions(listEl, inputEl.value).catch(() => {});
+  });
+  inputEl.addEventListener("input", () => {
+    const value = sanitizeDestinationText(inputEl.value);
+    onSave(value);
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      fillDestinationSuggestions(listEl, value).catch(() => {});
+    }, 170);
+  });
+  inputEl.addEventListener("change", saveValue);
+  inputEl.addEventListener("blur", saveValue);
 }
 
 function formatHistoryStatus(status) {
@@ -283,6 +358,7 @@ function connectStream() {
   state.eventSource.addEventListener("snapshot", (evt) => {
     const data = JSON.parse(evt.data);
     state.config = data.config || null;
+    if (data?.config?.googleMapsApiKey) places.setApiKey(data.config.googleMapsApiKey);
 
     state.live.drivers.clear();
     for (const d of data.drivers || []) state.live.drivers.set(d.id, d);
@@ -663,14 +739,7 @@ async function setDriverOnline(online) {
   if (online) {
     if (!(await ensureDriverAuth({ interactive: true }))) throw new Error("CANCELLED");
     if (!state.driver.destination) {
-      const destination = await promptDestination({
-        title: "Driver destination",
-        hint: "Set where you are going before going online.",
-        storageKey: STORAGE_KEYS.driverDestination,
-      });
-      if (!destination) throw new Error("CANCELLED");
-      state.driver.destination = destination;
-      localStorage.setItem(STORAGE_KEYS.driverDestination, destination);
+      throw new Error("MISSING_DRIVER_DESTINATION");
     }
 
     await primeAlertAudio().catch(() => {});
@@ -733,7 +802,7 @@ async function requestPickup(targetDriverId, riderContact) {
 
   const riderName = (riderContact?.name ?? "").toString().trim();
   const riderPhone = digitsOnly(riderContact?.phone ?? "");
-  const riderDestination = sanitizeDestinationText(riderContact?.destination ?? state.rider.destination);
+  const riderDestination = sanitizeDestinationText(state.rider.destination);
   if (!riderName) throw new Error("MISSING_RIDER_NAME");
   if (!isValidPhoneDigits(riderPhone)) throw new Error("INVALID_RIDER_PHONE");
   if (!riderDestination) throw new Error("MISSING_RIDER_DESTINATION");
@@ -1001,7 +1070,6 @@ function driverListItem(driver, { showRequest = true, interactive = false } = {}
         await requestPickup(driver.id, {
           name: contact.name,
           phone: contact.phone,
-          destination: contact.destination,
         });
       } catch (e) {
         const maxMinutesRaw = Number(state.config?.maxPickupMinutes);
@@ -1053,8 +1121,8 @@ function renderDriverView() {
   if (state.role !== "driver") return;
 
   const destination = sanitizeDestinationText(state.driver.destination);
-  if (els.driverDestinationText) {
-    els.driverDestinationText.textContent = destination ? `Going to: ${destination}` : "Destination not set.";
+  if (els.driverDestinationInput && document.activeElement !== els.driverDestinationInput) {
+    els.driverDestinationInput.value = destination;
   }
   els.driverStatePill.textContent = state.driver.online ? "Online" : "Offline";
   els.driverStatePill.classList.toggle("pill--online", state.driver.online);
@@ -1075,8 +1143,8 @@ function renderDriverView() {
 function renderRiderView() {
   if (state.role !== "rider") return;
   const destination = sanitizeDestinationText(state.rider.destination);
-  if (els.riderDestinationText) {
-    els.riderDestinationText.textContent = destination ? `Going to: ${destination}` : "Destination not set.";
+  if (els.riderDestinationInput && document.activeElement !== els.riderDestinationInput) {
+    els.riderDestinationInput.value = destination;
   }
 
   const active = getActiveRiderRequest();
@@ -1279,6 +1347,7 @@ function renderAll() {
   }
 
   setLocationText();
+  syncCurrentLocationLabels();
   els.locationCard.hidden = Boolean(state.geo.last);
   els.driverCard.hidden = state.role !== "driver";
   els.riderCard.hidden = state.role !== "rider";
@@ -1419,40 +1488,39 @@ function initEvents() {
   els.btnProfile?.addEventListener("click", openProfileSheet);
   els.btnSwitchToRider.addEventListener("click", clearRole);
   els.btnSwitchToDriver.addEventListener("click", clearRole);
-  els.btnDriverDestination?.addEventListener("click", async () => {
-    const destination = await promptDestination({
-      title: "Driver destination",
-      hint: "Set where you are going so riders on the same route can find you.",
-      storageKey: STORAGE_KEYS.driverDestination,
-    });
-    if (!destination) return;
+  let driverDestinationSyncTimer = null;
+  bindDestinationInput(els.driverDestinationInput, els.driverDestinationList, (destination) => {
     state.driver.destination = destination;
-    localStorage.setItem(STORAGE_KEYS.driverDestination, destination);
+    if (destination) localStorage.setItem(STORAGE_KEYS.driverDestination, destination);
+    else localStorage.removeItem(STORAGE_KEYS.driverDestination);
+
     if (state.driver.online) {
-      await api("/api/driver/destination", {
-        method: "POST",
-        headers: authHeaders(),
-        body: {
-          room: state.room,
-          code: state.roomCode || undefined,
-          driverId: state.deviceId,
-          destination,
-        },
-      }).catch(() => {});
+      if (driverDestinationSyncTimer) clearTimeout(driverDestinationSyncTimer);
+      driverDestinationSyncTimer = setTimeout(() => {
+        if (!state.driver.destination || !state.driver.online) return;
+        api("/api/driver/destination", {
+          method: "POST",
+          headers: authHeaders(),
+          body: {
+            room: state.room,
+            code: state.roomCode || undefined,
+            driverId: state.deviceId,
+            destination: state.driver.destination,
+          },
+        }).catch(() => {});
+      }, 240);
     }
-    renderAll();
   });
-  els.btnRiderDestination?.addEventListener("click", async () => {
-    const destination = await promptDestination({
-      title: "Ride destination",
-      hint: "Set where you are going so we can suggest matching drivers.",
-      storageKey: STORAGE_KEYS.riderDestination,
-    });
-    if (!destination) return;
+  bindDestinationInput(els.riderDestinationInput, els.riderDestinationList, (destination) => {
     state.rider.destination = destination;
-    localStorage.setItem(STORAGE_KEYS.riderDestination, destination);
-    renderAll();
+    if (destination) localStorage.setItem(STORAGE_KEYS.riderDestination, destination);
+    else localStorage.removeItem(STORAGE_KEYS.riderDestination);
+    renderRiderView();
   });
+  fillDestinationSuggestions(els.driverDestinationList, "").catch(() => {});
+  fillDestinationSuggestions(els.riderDestinationList, "").catch(() => {});
+  if (els.driverDestinationInput) els.driverDestinationInput.value = state.driver.destination || "";
+  if (els.riderDestinationInput) els.riderDestinationInput.value = state.rider.destination || "";
 
   els.btnReset.addEventListener("click", () => {
     hardReload().catch(() => {
@@ -1496,11 +1564,12 @@ function initEvents() {
       if (state.rider.locked) throw new Error("RIDER_LOCKED");
       const existing = getActiveRiderRequest();
       if (existing) return;
+      if (!sanitizeDestinationText(state.rider.destination)) {
+        throw new Error("MISSING_RIDER_DESTINATION");
+      }
 
       const contact = await promptRiderContact();
       if (!contact) return;
-      state.rider.destination = sanitizeDestinationText(contact.destination);
-      localStorage.setItem(STORAGE_KEYS.riderDestination, state.rider.destination);
 
       showRiderLoader({ title: "Requesting a ride", message: "Finding the nearest matching driver…" });
 
@@ -1514,7 +1583,7 @@ function initEvents() {
           code: state.roomCode || undefined,
           lat: state.geo.last.lat,
           lng: state.geo.last.lng,
-          destination: contact.destination,
+          destination: state.rider.destination,
         },
       });
 
@@ -1527,7 +1596,6 @@ function initEvents() {
       await requestPickup(driver.id, {
         name: contact.name,
         phone: contact.phone,
-        destination: contact.destination,
       });
     } catch (e) {
       const maxMinutesRaw = Number(state.config?.maxPickupMinutes);
@@ -1575,13 +1643,21 @@ async function init() {
   await api("/api/config")
     .then((cfg) => {
       state.config = cfg;
+      if (cfg?.googleMapsApiKey) {
+        places.setApiKey(cfg.googleMapsApiKey);
+      }
       if (els.daysHint) {
         els.daysHint.textContent = `Sign in once. Most active: ${cfg.daysOpen.join(" • ")}.`;
       }
+      fillDestinationSuggestions(els.driverDestinationList, "").catch(() => {});
+      fillDestinationSuggestions(els.riderDestinationList, "").catch(() => {});
+      refreshCurrentLocationLabel().catch(() => {});
     })
     .catch(() => {});
 
   await primeLocation();
+  syncCurrentLocationLabels();
+  refreshCurrentLocationLabel().catch(() => {});
 
   const hasSession = await ensureSignedIn({ interactive: false });
   if (hasSession) {

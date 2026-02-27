@@ -247,9 +247,29 @@ body {
   gap: 7px;
 }
 
+.field--compact {
+  gap: 6px;
+}
+
 .field__label {
   color: var(--muted);
   font-size: var(--text-xs);
+}
+
+.routeBox {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.routeFrom {
+  color: var(--muted);
+  font-size: var(--text-xs);
+  line-height: 1.45;
+  border: 1px dashed var(--border);
+  background: var(--surface-ghost);
+  border-radius: var(--radius);
+  padding: 10px 12px;
 }
 
 .input {

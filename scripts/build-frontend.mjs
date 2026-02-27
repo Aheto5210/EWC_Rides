@@ -10,6 +10,7 @@ const __dirname = path.dirname(__filename);
 const ROOT_DIR = path.join(__dirname, "..");
 
 const API_BASE_URL = process.env.API_BASE_URL || "http://localhost:3331";
+const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || "";
 const PUBLIC_DIR = path.join(ROOT_DIR, "public");
 const BUILD_DIR = path.join(ROOT_DIR, "build");
 
@@ -65,6 +66,8 @@ async function build() {
   // Replace __API_BASE_URL__ with actual URL
   console.log("Replacing API_BASE_URL placeholders...");
   await replaceInDir(BUILD_DIR, "__API_BASE_URL__", API_BASE_URL);
+  console.log("Replacing GOOGLE_MAPS_API_KEY placeholders...");
+  await replaceInDir(BUILD_DIR, "__GOOGLE_MAPS_API_KEY__", GOOGLE_MAPS_API_KEY);
   
   console.log(`Frontend build complete! Output: ${BUILD_DIR}`);
 }

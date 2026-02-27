@@ -20,6 +20,12 @@ export const STORAGE_KEYS = {
 };
 
 export const NOTIFY_AUDIO_URL = "/assets/drivernotify.mp3";
+export const GOOGLE_MAPS_API_KEY = "__GOOGLE_MAPS_API_KEY__";
+export const DESTINATION_SEED_SUGGESTIONS = [
+  "EWC Comm25 Campus",
+  "Prayer Factory",
+  "Accra Mall",
+];
 
 export const CALL_ICON_SVG = `
   <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">

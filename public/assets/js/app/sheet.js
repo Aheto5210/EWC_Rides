@@ -1,5 +1,5 @@
 import { STORAGE_KEYS } from "./constants.js";
-import { digitsOnly, formatPhoneDigits, isValidPhoneDigits, sanitizeDestinationText } from "./utils.js";
+import { digitsOnly, formatPhoneDigits, isValidPhoneDigits } from "./utils.js";
 
 export function createSheet(state, els) {
   function setSheetError(msg) {
@@ -48,7 +48,6 @@ export function createSheet(state, els) {
       const body = document.createElement("div");
       const savedName = (localStorage.getItem(STORAGE_KEYS.riderName) ?? "").trim();
       const savedPhone = (localStorage.getItem(STORAGE_KEYS.riderPhone) ?? "").trim();
-      const savedDestination = (localStorage.getItem(STORAGE_KEYS.riderDestination) ?? "").trim();
 
       body.innerHTML = `
         <div class="muted">This info will be shared with the driver you request.</div>
@@ -60,26 +59,19 @@ export function createSheet(state, els) {
           <span class="field__label">Your phone</span>
           <input id="sheetRiderPhone" class="input" inputmode="tel" autocomplete="tel" placeholder="e.g., 4045551234" />
         </label>
-        <label class="field">
-          <span class="field__label">Where are you going?</span>
-          <input id="sheetRiderDestination" class="input" autocomplete="street-address" placeholder="e.g., Accra Mall" />
-        </label>
       `;
 
       openSheet({ title: "Request a ride", body, confirmText: "Request" });
 
       const nameInput = body.querySelector("#sheetRiderName");
       const phoneInput = body.querySelector("#sheetRiderPhone");
-      const destinationInput = body.querySelector("#sheetRiderDestination");
       if (nameInput) nameInput.value = savedName;
       if (phoneInput) phoneInput.value = formatPhoneDigits(savedPhone);
-      if (destinationInput) destinationInput.value = savedDestination;
 
       state.sheet.onClose = () => resolve(null);
       state.sheet.onConfirm = async () => {
         const name = (nameInput?.value ?? "").trim();
         const phoneDigits = digitsOnly(phoneInput?.value ?? "");
-        const destination = sanitizeDestinationText(destinationInput?.value ?? "");
 
         if (!name) {
           setSheetError("Please enter your name.");
@@ -91,56 +83,12 @@ export function createSheet(state, els) {
           phoneInput?.focus();
           return;
         }
-        if (!destination) {
-          setSheetError("Please enter where you are going.");
-          destinationInput?.focus();
-          return;
-        }
 
         localStorage.setItem(STORAGE_KEYS.riderName, name);
         localStorage.setItem(STORAGE_KEYS.riderPhone, phoneDigits);
-        localStorage.setItem(STORAGE_KEYS.riderDestination, destination);
 
         state.sheet.onClose = null;
-        resolve({ name, phone: phoneDigits, destination });
-        closeSheet();
-      };
-    });
-  }
-
-  function promptDestination({
-    title = "Destination",
-    hint = "Enter where you are going.",
-    storageKey = STORAGE_KEYS.riderDestination,
-    placeholder = "e.g., Accra Mall",
-    confirmText = "Save",
-  } = {}) {
-    return new Promise((resolve) => {
-      const body = document.createElement("div");
-      const saved = (localStorage.getItem(storageKey) ?? "").trim();
-      body.innerHTML = `
-        <div class="muted">${hint}</div>
-        <label class="field">
-          <span class="field__label">Destination</span>
-          <input id="sheetDestinationInput" class="input" autocomplete="street-address" placeholder="${placeholder}" />
-        </label>
-      `;
-
-      openSheet({ title, body, confirmText });
-      const input = body.querySelector("#sheetDestinationInput");
-      if (input) input.value = saved;
-
-      state.sheet.onClose = () => resolve(null);
-      state.sheet.onConfirm = async () => {
-        const destination = sanitizeDestinationText(input?.value ?? "");
-        if (!destination) {
-          setSheetError("Please enter a destination.");
-          input?.focus();
-          return;
-        }
-        localStorage.setItem(storageKey, destination);
-        state.sheet.onClose = null;
-        resolve(destination);
+        resolve({ name, phone: phoneDigits });
         closeSheet();
       };
     });
@@ -337,7 +285,6 @@ export function createSheet(state, els) {
     closeSheet,
     setSheetError,
     promptRiderContact,
-    promptDestination,
     promptDriverContact,
     promptAuthRegister,
     promptRoleLogin,

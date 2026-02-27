@@ -20,6 +20,8 @@ export function createState() {
       theme: "dark",
       refreshTimer: null,
       themeMedia: null,
+      lastGeoLabel: "",
+      geoLabelFetchAt: 0,
     },
     sheet: {
       open: false,

@@ -92,9 +92,19 @@
             </button>
           </div>
 
-          <div class="row row--between">
-            <div id="driverDestinationText" class="muted">Destination not set.</div>
-            <button id="btnDriverDestination" class="btn btn--ghost" type="button">Set Destination</button>
+          <div class="routeBox">
+            <div id="driverFromText" class="routeFrom">From: Detecting current location…</div>
+            <label class="field field--compact">
+              <span class="field__label">Where are you going today?</span>
+              <input
+                id="driverDestinationInput"
+                class="input"
+                list="driverDestinationList"
+                autocomplete="off"
+                placeholder="Where are you going today?"
+              />
+              <datalist id="driverDestinationList"></datalist>
+            </label>
           </div>
 
           <div class="row row--between">
@@ -120,9 +130,19 @@
             </button>
           </div>
 
-          <div class="row row--between">
-            <div id="riderDestinationText" class="muted">Destination not set.</div>
-            <button id="btnRiderDestination" class="btn btn--ghost" type="button">Set Destination</button>
+          <div class="routeBox">
+            <div id="riderFromText" class="routeFrom">From: Detecting current location…</div>
+            <label class="field field--compact">
+              <span class="field__label">Where are you going today?</span>
+              <input
+                id="riderDestinationInput"
+                class="input"
+                list="riderDestinationList"
+                autocomplete="off"
+                placeholder="Where are you going today?"
+              />
+              <datalist id="riderDestinationList"></datalist>
+            </label>
           </div>
 
           <div id="riderActive" class="notice" hidden></div>

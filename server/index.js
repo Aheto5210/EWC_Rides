@@ -14,6 +14,7 @@ const PORT = Number(process.env.PORT ?? 3331);
 const PUBLIC_DIR = process.env.PUBLIC_DIR || path.join(__dirname, "..", "public");
 
 const ROOM_CODE = (process.env.ROOM_CODE ?? "").trim() || null;
+const GOOGLE_MAPS_API_KEY = (process.env.GOOGLE_MAPS_API_KEY ?? "").trim();
 const DRIVER_DB_FILE = path.join(__dirname, "data", "ewc.sqlite");
 const MAX_JSON_BODY_BYTES = clampNumber(Number(process.env.MAX_JSON_BODY_BYTES ?? 32_768), 1024, 1_048_576);
 const DRIVER_SESSION_TTL_MS =
@@ -959,6 +960,7 @@ function sendSnapshot(subscriber, roomId, roomState) {
       requestTtlMinutes: Math.round(REQUEST_TTL_MS / 60_000),
       driverStaleSeconds: Math.round(DRIVER_STALE_MS / 1_000),
       roomCodeRequired: Boolean(ROOM_CODE),
+      googleMapsApiKey: GOOGLE_MAPS_API_KEY || "",
     },
     drivers: roomState.snapshotCache.drivers,
     requests: [],
@@ -1358,6 +1360,7 @@ const requestHandler = async (req, res) => {
       requestTtlMinutes: Math.round(REQUEST_TTL_MS / 60_000),
       driverStaleSeconds: Math.round(DRIVER_STALE_MS / 1_000),
       daysOpen: ["Tuesday", "Thursday", "Sunday"],
+      googleMapsApiKey: GOOGLE_MAPS_API_KEY || "",
     });
     return;
   }

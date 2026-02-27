@@ -4,8 +4,8 @@ This is a lightweight mobile-first web app for church members:
 
 - Users **register with email + password** and choose a role (**driver** or **rider**).
 - **Drivers** go online to share live location.
-- **Drivers** must set their destination before going online.
-- **Riders** set their destination and see only matching drivers on similar routes.
+- **Drivers** type destination inline (“Where are you going today?”) before going online.
+- **Riders** type destination inline and see only matching drivers on similar routes.
 - Matching prioritizes closest cars first and limits suggestions to about **20 minutes**.
 - Riders tap a driver to send a **pickup request** to that driver.
 - Drivers can **accept** and **open Google Maps** to navigate to pickup.
@@ -68,6 +68,7 @@ Environment variables:
 - `ASSIGNED_TTL_MINUTES` (default `180`) — assigned rides are auto-cleaned after N minutes
 - `HTTPS=1` (optional) — enable HTTPS listener (requires `.cert/key.pem` + `.cert/cert.pem`)
 - `HTTPS_PORT` (default `3443`)
+- `GOOGLE_MAPS_API_KEY` (build-time for frontend) — enables Google Places destination suggestions
 
 ### Optional URL params
 
