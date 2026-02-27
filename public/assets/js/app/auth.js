@@ -62,10 +62,10 @@ export async function registerUser({ name, phone, email, password, role }) {
   });
 }
 
-export async function loginUser({ email, password, role }) {
+export async function loginUser({ identifier, password, role }) {
   return api("/api/auth/login", {
     method: "POST",
-    body: { email, password, role },
+    body: { identifier, password, role },
   });
 }
 

@@ -578,7 +578,7 @@ async function ensureRoleAuth(requiredRole, { interactive } = { interactive: fal
 
   try {
     const result = await loginUser({
-      email: entered.email,
+      identifier: entered.identifier,
       password: entered.password,
       role: requiredRole || undefined,
     });
@@ -591,8 +591,8 @@ async function ensureRoleAuth(requiredRole, { interactive } = { interactive: fal
         ? "Wrong email or password."
         : e.message === "AUTH_ROLE_MISMATCH"
           ? `This account is registered as ${roleLabel(mismatchRole)}.`
-          : e.message === "INVALID_EMAIL"
-            ? "Enter a valid email."
+          : e.message === "INVALID_LOGIN_IDENTIFIER"
+            ? "Enter a valid email or phone."
             : e.message === "MISSING_PASSWORD"
               ? "Enter your password."
           : e.message;

@@ -115,10 +115,11 @@ body {
   position: sticky;
   top: env(safe-area-inset-top);
   z-index: 20;
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: var(--space-1);
-  padding: var(--space-1);
+  gap: var(--space-2);
+  padding: 10px 12px;
   border-radius: var(--radius);
   border: 1px solid var(--border);
   background: var(--tabs-bg);
@@ -129,16 +130,39 @@ body {
     transform var(--dur-2) var(--ease-soft);
 }
 
+.tabs__left {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.tabs__logo {
+  width: 24px;
+  height: 24px;
+  display: block;
+}
+
+.tabs__brand {
+  font-size: var(--text-sm);
+  font-weight: 820;
+  letter-spacing: 0.2px;
+  color: var(--text);
+  white-space: nowrap;
+}
+
 .tabs__main {
   display: flex;
-  flex: 1;
   gap: var(--space-1);
+  width: min(100%, 280px);
+  margin: 0 auto;
 }
 
 .tabs__actions {
   display: flex;
   align-items: center;
   gap: var(--space-1);
+  justify-self: end;
 }
 
 .tab {
@@ -179,17 +203,7 @@ body {
   display: grid;
   place-items: center;
   text-align: center;
-  padding: clamp(10px, 4vh, 28px) var(--space-1) 4px;
-}
-
-.hero__logo {
-  width: 56px;
-  height: 56px;
-  filter: drop-shadow(0 6px 10px rgba(0, 0, 0, 0.24));
-}
-
-:root[data-theme="light"] .hero__logo {
-  filter: drop-shadow(0 10px 14px rgba(0, 0, 0, 0.18));
+  padding: clamp(4px, 2.4vh, 14px) var(--space-1) 2px;
 }
 
 .hero__title {
@@ -245,6 +259,10 @@ body {
 .field {
   display: grid;
   gap: 7px;
+}
+
+.field + .field {
+  margin-top: 4px;
 }
 
 .field--compact {
@@ -1262,8 +1280,13 @@ select {
   }
 
   .tabs {
-    padding: 6px;
-    gap: 6px;
+    grid-template-columns: auto 1fr auto;
+    padding: 8px 10px;
+    gap: 8px;
+  }
+
+  .tabs__brand {
+    display: none;
   }
 
   .tab {

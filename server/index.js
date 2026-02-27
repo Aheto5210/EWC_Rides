@@ -273,6 +273,10 @@ function sanitizeEmail(email) {
   return trimmed.slice(0, 120);
 }
 
+function sanitizeIdentifier(identifier) {
+  return (identifier ?? "").toString().trim().slice(0, 120);
+}
+
 function sanitizeRole(role) {
   const value = (role ?? "").toString().trim().toLowerCase();
   if (value === "driver") return "driver";
@@ -329,6 +333,14 @@ function verifyPassword(password, storedHash) {
   } catch {
     return false;
   }
+}
+
+function verifyPasswordWithLegacy(password, storedHash) {
+  if (verifyPassword(password, storedHash)) return { ok: true, legacy: false };
+  const raw = String(storedHash ?? "");
+  if (!raw) return { ok: false, legacy: false };
+  if (!raw.startsWith("s2$") && raw === String(password)) return { ok: true, legacy: true };
+  return { ok: false, legacy: false };
 }
 
 async function ensureDir(dir) {
@@ -507,6 +519,14 @@ function dbInsertUser({ id, email, passwordHash, name, phone = "", role, now }) 
   db.prepare(
     "INSERT INTO users (id, email, password_hash, name, phone, role, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
   ).run(id, email, passwordHash, name, phone, role, now, now);
+}
+
+function dbUpdateUserPasswordHash({ id, passwordHash, now }) {
+  db.prepare("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?").run(
+    passwordHash,
+    now,
+    id,
+  );
 }
 
 function toPublicUser(user) {
@@ -1503,17 +1523,34 @@ const requestHandler = async (req, res) => {
     if (!body) return json(res, 400, { error: "INVALID_JSON" });
     if (body.__tooLarge) return json(res, 413, { error: "BODY_TOO_LARGE" });
 
-    const email = sanitizeEmail(body.email);
+    const identifier = sanitizeIdentifier(body.identifier ?? body.email ?? body.phone);
+    const email = sanitizeEmail(identifier);
+    const phone = sanitizePhone(identifier);
     const password = (body.password ?? "").toString();
     const forcedRole = url.startsWith("/api/auth/driver/login") ? "driver" : "";
     const requestedRole = forcedRole || sanitizeRole(body.role);
-    if (!isValidEmail(email)) return json(res, 400, { error: "INVALID_EMAIL" });
+    if (!isValidEmail(email) && !isValidPhone(phone)) {
+      return json(res, 400, { error: "INVALID_LOGIN_IDENTIFIER" });
+    }
     if (!password) return json(res, 400, { error: "MISSING_PASSWORD" });
     if (body.role && !isValidRole(requestedRole)) return json(res, 400, { error: "INVALID_ROLE" });
 
-    const user = dbGetUserByEmail(email);
-    if (!user || !verifyPassword(password, user.passwordHash)) {
+    const user =
+      (isValidEmail(email) ? dbGetUserByEmail(email) : null) || (isValidPhone(phone) ? dbGetUserByPhone(phone) : null);
+    const verified = verifyPasswordWithLegacy(password, user?.passwordHash);
+    if (!user || !verified.ok) {
       return json(res, 401, { error: "AUTH_INVALID_CREDENTIALS" });
+    }
+    if (verified.legacy) {
+      try {
+        dbUpdateUserPasswordHash({
+          id: user.id,
+          passwordHash: hashPassword(password),
+          now: nowMs(),
+        });
+      } catch {
+        // ignore legacy rehash failure
+      }
     }
     if (requestedRole && user.role !== requestedRole) {
       return json(res, 403, { error: "AUTH_ROLE_MISMATCH", role: user.role });

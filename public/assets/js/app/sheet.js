@@ -237,13 +237,15 @@ export function createSheet(state, els) {
     return new Promise((resolve) => {
       const body = document.createElement("div");
       const savedEmail = (localStorage.getItem(STORAGE_KEYS.authEmail) ?? "").trim();
+      const savedPhone = (localStorage.getItem(STORAGE_KEYS.authPhone) ?? "").trim();
+      const savedIdentifier = savedEmail || formatPhoneDigits(savedPhone);
       const roleLabel = role === "driver" ? "driver" : role === "rider" ? "rider" : "your account";
 
       body.innerHTML = `
         <div class="muted">Sign in to continue as a ${roleLabel}.</div>
         <label class="field">
-          <span class="field__label">Email</span>
-          <input id="sheetLoginEmail" class="input" inputmode="email" autocomplete="email" placeholder="e.g., john@email.com" />
+          <span class="field__label">Email or phone</span>
+          <input id="sheetLoginEmail" class="input" inputmode="text" autocomplete="username" placeholder="e.g., john@email.com or 0551234567" />
         </label>
         <label class="field">
           <span class="field__label">Password</span>
@@ -255,15 +257,15 @@ export function createSheet(state, els) {
 
       const emailInput = body.querySelector("#sheetLoginEmail");
       const passwordInput = body.querySelector("#sheetLoginPassword");
-      if (emailInput) emailInput.value = savedEmail;
+      if (emailInput) emailInput.value = savedIdentifier;
 
       state.sheet.onClose = () => resolve(null);
       state.sheet.onConfirm = async () => {
-        const email = (emailInput?.value ?? "").trim().toLowerCase();
+        const identifier = (emailInput?.value ?? "").trim();
         const password = (passwordInput?.value ?? "").toString();
 
-        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-          setSheetError("Enter a valid email address.");
+        if (!identifier) {
+          setSheetError("Enter your email or phone.");
           emailInput?.focus();
           return;
         }
@@ -274,7 +276,7 @@ export function createSheet(state, els) {
         }
 
         state.sheet.onClose = null;
-        resolve({ email, password });
+        resolve({ identifier, password });
         closeSheet();
       };
     });
